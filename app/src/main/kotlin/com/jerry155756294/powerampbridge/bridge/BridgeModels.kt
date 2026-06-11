@@ -51,6 +51,7 @@ data class BridgeUiState(
   val serviceRunning: Boolean = false,
   val listenerActive: Boolean = false,
   val listenPort: Int = 3000,
+  val localAddresses: List<String> = emptyList(),
   val powerampAvailable: Boolean = false,
   val activeClient: String? = null,
   val clientId: String? = null,

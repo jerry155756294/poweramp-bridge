@@ -113,7 +113,7 @@ private fun BridgeApp(
       }
 
       when (selectedTab) {
-        0 -> SettingsTab(settings, onStart, onStop, settingsRepository)
+        0 -> SettingsTab(uiState, settings, onStart, onStop, settingsRepository)
         1 -> StatusTab(uiState)
         else -> DebugTab(uiState)
       }
@@ -123,6 +123,7 @@ private fun BridgeApp(
 
 @Composable
 private fun SettingsTab(
+  uiState: BridgeUiState,
   settings: BridgeSettings,
   onStart: () -> Unit,
   onStop: () -> Unit,
@@ -153,6 +154,20 @@ private fun SettingsTab(
       )
       Text(
         text = stringResourceSafe(R.string.settings_no_token_notice),
+        style = MaterialTheme.typography.bodySmall
+      )
+    }
+
+    SectionCard(stringResourceSafe(R.string.settings_ip_title)) {
+      if (uiState.localAddresses.isEmpty()) {
+        Text(stringResourceSafe(R.string.settings_ip_empty))
+      } else {
+        uiState.localAddresses.forEach { address ->
+          StatusLine("IP", address)
+        }
+      }
+      Text(
+        text = stringResourceSafe(R.string.settings_ip_hint),
         style = MaterialTheme.typography.bodySmall
       )
     }
@@ -188,6 +203,7 @@ private fun StatusTab(uiState: BridgeUiState) {
     SectionCard("Bridge") {
       StatusLine("服務", if (uiState.serviceRunning) "執行中" else "已停止")
       StatusLine("Listener", if (uiState.listenerActive) "TCP ${uiState.listenPort}" else "未監聽")
+      StatusLine("本機位址", uiState.localAddresses.firstOrNull() ?: stringResourceSafe(R.string.settings_ip_empty))
       StatusLine("Client IP", uiState.activeClient ?: stringResourceSafe(R.string.client_none))
       StatusLine("Client ID", uiState.clientId ?: "未提供")
       StatusLine("協議版本", uiState.protocolVersion?.toString() ?: "未知")

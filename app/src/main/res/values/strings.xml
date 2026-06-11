@@ -21,4 +21,7 @@
   <string name="settings_auto_start">開啟 app 時自動啟動 Bridge</string>
   <string name="settings_start_on_boot">開機後自動啟動 Bridge</string>
   <string name="settings_foreground_persistent">保持前景通知常駐</string>
+  <string name="settings_ip_title">目前可連線位址</string>
+  <string name="settings_ip_empty">偵測中，或目前沒有可用位址</string>
+  <string name="settings_ip_hint">請讓 MBRC 連到其中一個位址，再搭配上方的 TCP Port。</string>
 </resources>

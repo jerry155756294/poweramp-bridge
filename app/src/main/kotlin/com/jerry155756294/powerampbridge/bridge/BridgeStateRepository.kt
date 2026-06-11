@@ -18,6 +18,10 @@ class BridgeStateRepository {
     _state.update { it.copy(listenerActive = active, listenPort = port) }
   }
 
+  fun setLocalAddresses(addresses: List<String>) {
+    _state.update { it.copy(localAddresses = addresses) }
+  }
+
   fun updateSession(snapshot: LogicalClientSnapshot?) {
     _state.update { it.withSession(snapshot) }
   }
