@@ -2,12 +2,14 @@ package com.jerry155756294.powerampbridge
 
 import android.app.Application
 import com.jerry155756294.powerampbridge.bridge.BridgeStateRepository
+import com.jerry155756294.powerampbridge.bridge.NetworkAddressMonitor
 import com.jerry155756294.powerampbridge.data.BridgeSettingsRepository
 import timber.log.Timber
 
 class BridgeApplication : Application() {
   lateinit var appContainer: AppContainer
     private set
+  private lateinit var networkAddressMonitor: NetworkAddressMonitor
 
   override fun onCreate() {
     super.onCreate()
@@ -16,6 +18,8 @@ class BridgeApplication : Application() {
       settingsRepository = BridgeSettingsRepository(this),
       stateRepository = BridgeStateRepository()
     )
+    networkAddressMonitor = NetworkAddressMonitor(this, appContainer.stateRepository)
+    networkAddressMonitor.start()
   }
 }
 

@@ -1,5 +1,6 @@
 package com.jerry155756294.powerampbridge.bridge
 
+import com.jerry155756294.powerampbridge.protocol.LogicalClientSnapshot
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,12 +18,38 @@ class BridgeStateRepository {
     _state.update { it.copy(listenerActive = active, listenPort = port) }
   }
 
-  fun setHandshakeComplete(complete: Boolean) {
-    _state.update { it.copy(handshakeComplete = complete) }
+  fun setLocalAddresses(addresses: List<String>) {
+    _state.update { it.copy(localAddresses = addresses) }
   }
 
-  fun setActiveClient(client: String?) {
-    _state.update { it.copy(activeClient = client) }
+  fun updateSession(snapshot: LogicalClientSnapshot?) {
+    _state.update { it.withSession(snapshot) }
+  }
+
+  fun recordProbe(remoteAddress: String) {
+    val timestamp = LogEntry.timestampNow()
+    _state.update {
+      it.copy(lastProbeAt = "$timestamp ($remoteAddress)")
+    }
+  }
+
+  fun recordRejectedConnection(event: ConnectionEventSnapshot, reason: String) {
+    _state.update {
+      it.copy(lastRejectedReason = event.format(reason))
+    }
+  }
+
+  fun recordDisconnect(event: ConnectionEventSnapshot, reason: String) {
+    _state.update {
+      it.copy(
+        lastDisconnectReason = event.format(reason),
+        lastDisconnectCategory = event.disconnectCategory ?: reason,
+        lastDisconnectSocketRole = event.role?.name?.lowercase(),
+        lastDisconnectHandshakeState = event.handshakeState,
+        lastDisconnectLastCommand = event.lastIncomingContext,
+        lastDisconnectLastReply = event.lastOutgoingContext
+      )
+    }
   }
 
   fun setPowerampAvailable(available: Boolean) {
@@ -40,8 +67,37 @@ class BridgeStateRepository {
     }
   }
 
+  fun tickPlaybackPosition(stepMs: Long) {
+    _state.update { current ->
+      if (current.playback.state != "playing") {
+        return@update current
+      }
+
+      val track = current.playback.track
+      val nextPosition = if (track.durationMs > 0L) {
+        (track.positionMs + stepMs).coerceAtMost(track.durationMs)
+      } else {
+        track.positionMs + stepMs
+      }
+
+      current.copy(
+        playback = current.playback.copy(
+          track = track.copy(positionMs = nextPosition)
+        )
+      )
+    }
+  }
+
+  fun setPositionSyncActive(active: Boolean) {
+    _state.update { it.copy(positionSyncActive = active) }
+  }
+
   fun recordCommand(message: String) {
     _state.update { it.copy(recentCommands = addEntry(it.recentCommands, message)) }
+  }
+
+  fun recordProtocolEvent(message: String) {
+    _state.update { it.copy(recentProtocolEvents = addEntry(it.recentProtocolEvents, message)) }
   }
 
   fun recordPowerampEvent(message: String) {

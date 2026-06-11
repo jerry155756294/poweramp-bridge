@@ -113,7 +113,7 @@ private fun BridgeApp(
       }
 
       when (selectedTab) {
-        0 -> SettingsTab(settings, onStart, onStop, settingsRepository)
+        0 -> SettingsTab(uiState, settings, onStart, onStop, settingsRepository)
         1 -> StatusTab(uiState)
         else -> DebugTab(uiState)
       }
@@ -123,6 +123,7 @@ private fun BridgeApp(
 
 @Composable
 private fun SettingsTab(
+  uiState: BridgeUiState,
   settings: BridgeSettings,
   onStart: () -> Unit,
   onStop: () -> Unit,
@@ -130,7 +131,6 @@ private fun SettingsTab(
 ) {
   val scope = rememberCoroutineScope()
   var portText by remember(settings.port) { mutableStateOf(settings.port.toString()) }
-  var tokenText by remember(settings.sharedToken) { mutableStateOf(settings.sharedToken) }
 
   Column(
     modifier = Modifier
@@ -139,7 +139,7 @@ private fun SettingsTab(
       .padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp)
   ) {
-    SectionCard("連線") {
+    SectionCard(stringResourceSafe(R.string.settings_network_title)) {
       OutlinedTextField(
         value = portText,
         onValueChange = {
@@ -152,29 +152,34 @@ private fun SettingsTab(
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = Modifier.fillMaxWidth()
       )
-      OutlinedTextField(
-        value = tokenText,
-        onValueChange = {
-          tokenText = it
-          scope.launch { repository.updateSharedToken(it) }
-        },
-        label = { Text("Shared Token") },
-        supportingText = { Text(stringResourceSafe(R.string.token_optional)) },
-        modifier = Modifier.fillMaxWidth()
+      Text(
+        text = stringResourceSafe(R.string.settings_no_token_notice),
+        style = MaterialTheme.typography.bodySmall
       )
     }
 
-    SectionCard("啟動選項") {
-      SettingSwitch("非本機要求 token", settings.requireTokenForRemote) {
-        scope.launch { repository.updateRequireTokenForRemote(it) }
+    SectionCard(stringResourceSafe(R.string.settings_ip_title)) {
+      if (uiState.localAddresses.isEmpty()) {
+        Text(stringResourceSafe(R.string.settings_ip_empty))
+      } else {
+        uiState.localAddresses.forEach { address ->
+          StatusLine("IP", address)
+        }
       }
-      SettingSwitch("開啟 app 時自動啟動", settings.autoStart) {
+      Text(
+        text = stringResourceSafe(R.string.settings_ip_hint),
+        style = MaterialTheme.typography.bodySmall
+      )
+    }
+
+    SectionCard(stringResourceSafe(R.string.settings_service_title)) {
+      SettingSwitch(stringResourceSafe(R.string.settings_auto_start), settings.autoStart) {
         scope.launch { repository.updateAutoStart(it) }
       }
-      SettingSwitch("開機啟動 bridge", settings.startOnBoot) {
+      SettingSwitch(stringResourceSafe(R.string.settings_start_on_boot), settings.startOnBoot) {
         scope.launch { repository.updateStartOnBoot(it) }
       }
-      SettingSwitch("通知常駐", settings.foregroundPersistent) {
+      SettingSwitch(stringResourceSafe(R.string.settings_foreground_persistent), settings.foregroundPersistent) {
         scope.launch { repository.updateForegroundPersistent(it) }
       }
     }
@@ -196,10 +201,19 @@ private fun StatusTab(uiState: BridgeUiState) {
     verticalArrangement = Arrangement.spacedBy(12.dp)
   ) {
     SectionCard("Bridge") {
-      StatusLine("服務", if (uiState.serviceRunning) "運作中" else "未運作")
-      StatusLine("Listener", if (uiState.listenerActive) "TCP ${uiState.listenPort}" else "未監聽")
-      StatusLine("Client", uiState.activeClient ?: stringResourceSafe(R.string.client_none))
-      StatusLine("Handshake", if (uiState.handshakeComplete) "已完成" else "尚未完成")
+      StatusLine("服務", if (uiState.serviceRunning) "執行中" else "已停止")
+      StatusLine("Listener", if (uiState.listenerActive) "TCP ${uiState.listenPort}" else "未啟動")
+      StatusLine("目前 IP", uiState.localAddresses.firstOrNull() ?: stringResourceSafe(R.string.settings_ip_empty))
+      StatusLine("Client IP", uiState.activeClient ?: stringResourceSafe(R.string.client_none))
+      StatusLine("Client ID", uiState.clientId ?: "未提供")
+      StatusLine("協議版本", uiState.protocolVersion?.toString() ?: "未知")
+      StatusLine("主 socket", socketStatus(uiState.broadcastSocketConnected, uiState.broadcastInitialized))
+      StatusLine("請求 socket", uiState.activeRequestSocketCount.toString())
+      StatusLine("位置同步", if (uiState.positionSyncActive) "進行中" else "閒置")
+      StatusLine("最近 verifyconnection", uiState.lastProbeAt ?: "尚無")
+      StatusLine("最近拒絕", uiState.lastRejectedReason ?: "尚無")
+      StatusLine("最近斷線", uiState.lastDisconnectReason ?: "尚無")
+      StatusLine("斷線摘要", formatDisconnectSummary(uiState))
     }
 
     SectionCard("Poweramp") {
@@ -238,9 +252,18 @@ private fun DebugTab(uiState: BridgeUiState) {
     SectionCard("最後錯誤") {
       Text(uiState.lastError ?: "目前沒有錯誤")
     }
-    SectionCard("最近命令") {
+    SectionCard("最近協議事件") {
+      if (uiState.recentProtocolEvents.isEmpty()) {
+        Text("尚無")
+      } else {
+        uiState.recentProtocolEvents.forEach { entry ->
+          StatusLine(entry.timestamp, entry.message)
+        }
+      }
+    }
+    SectionCard("最近收到的命令") {
       if (uiState.recentCommands.isEmpty()) {
-        Text("尚未收到命令")
+        Text("尚無")
       } else {
         uiState.recentCommands.forEach { entry ->
           StatusLine(entry.timestamp, entry.message)
@@ -249,7 +272,7 @@ private fun DebugTab(uiState: BridgeUiState) {
     }
     SectionCard("最近 Poweramp 事件") {
       if (uiState.recentPowerampEvents.isEmpty()) {
-        Text("尚未收到事件")
+        Text("尚無")
       } else {
         uiState.recentPowerampEvents.forEach { entry ->
           StatusLine(entry.timestamp, entry.message)
@@ -304,6 +327,22 @@ private fun StatusLine(label: String, value: String) {
     Text(value, style = MaterialTheme.typography.bodyMedium)
   }
 }
+
+private fun socketStatus(connected: Boolean, initialized: Boolean): String = when {
+  initialized -> "已完成 init"
+  connected -> "已連線，等待 init"
+  else -> "未連線"
+}
+
+private fun formatDisconnectSummary(uiState: BridgeUiState): String = buildList {
+  uiState.lastDisconnectCategory?.let { add("category=$it") }
+  uiState.lastDisconnectSocketRole?.let { add("role=$it") }
+  uiState.lastDisconnectHandshakeState?.let { add("handshake=$it") }
+  uiState.lastDisconnectLastCommand?.let { add("last_in=$it") }
+  uiState.lastDisconnectLastReply?.let { add("last_out=$it") }
+}.ifEmpty {
+  listOf("尚無")
+}.joinToString(" | ")
 
 @Composable
 private fun stringResourceSafe(id: Int): String = androidx.compose.ui.res.stringResource(id)

@@ -4,7 +4,6 @@ import com.jerry155756294.powerampbridge.BuildConfig
 import com.jerry155756294.powerampbridge.bridge.BridgeStateRepository
 import com.jerry155756294.powerampbridge.bridge.BridgeUiState
 import com.jerry155756294.powerampbridge.bridge.PowerampGateway
-import com.jerry155756294.powerampbridge.data.BridgeSettings
 import org.json.JSONObject
 
 class MbrcProtocolAdapter(
@@ -12,41 +11,16 @@ class MbrcProtocolAdapter(
   private val stateRepository: BridgeStateRepository,
   private val powerampGateway: PowerampGateway
 ) {
-  private var initialized = false
+  data class PageRequest(
+    val offset: Int = 0,
+    val limit: Int = DEFAULT_PAGE_LIMIT
+  )
 
-  fun onClientConnected() {
-    initialized = false
-    stateRepository.setHandshakeComplete(false)
-  }
-
-  fun onClientDisconnected() {
-    initialized = false
-    stateRepository.setHandshakeComplete(false)
-  }
-
-  fun canBroadcastState(): Boolean = initialized
-
-  fun handleMessage(message: IncomingMessage, settings: BridgeSettings): List<String> {
+  fun handleCommand(message: IncomingMessage): List<String> {
     stateRepository.recordCommand("${message.context}: ${message.data ?: ""}".trim())
     return when (message.context) {
-      ProtocolConstants.Player ->
-        listOf(codec.encode(ProtocolConstants.Player, "Android"))
-
-      ProtocolConstants.Protocol -> {
-        stateRepository.setHandshakeComplete(true)
-        listOf(codec.encode(ProtocolConstants.Protocol, ProtocolConstants.ProtocolVersion.toString()))
-      }
-
-      ProtocolConstants.Init -> {
-        initialized = true
-        snapshotMessages(stateRepository.state.value)
-      }
-
-      ProtocolConstants.VerifyConnection ->
-        listOf(codec.encode(ProtocolConstants.VerifyConnection, ""))
-
-      ProtocolConstants.Ping ->
-        listOf(codec.encode(ProtocolConstants.Pong, message.data ?: ""))
+      ProtocolConstants.PluginVersion ->
+        listOf(codec.encode(ProtocolConstants.PluginVersion, pluginVersion()))
 
       ProtocolConstants.PlayerPlayPause ->
         commandResult(powerampGateway.playPause(), ProtocolConstants.PlayerPlayPause)
@@ -70,16 +44,17 @@ class MbrcProtocolAdapter(
         val volume = asInt(message.data)
         if (volume != null) {
           powerampGateway.setVolume(volume)
+          powerampGateway.refreshVolumeSnapshot()
           listOf(codec.encode(ProtocolConstants.PlayerVolume, volume))
         } else {
-          commandUnavailable(ProtocolConstants.PlayerVolume)
+          listOf(codec.encode(ProtocolConstants.PlayerVolume, stateRepository.state.value.playback.volume))
         }
       }
 
       ProtocolConstants.NowPlayingPosition -> {
-        val seconds = asInt(message.data)
-        if (seconds != null) {
-          commandResult(powerampGateway.seekTo(seconds), ProtocolConstants.NowPlayingPosition)
+        val positionMs = asLong(message.data)
+        if (positionMs != null) {
+          commandResult(powerampGateway.seekTo(positionMs), ProtocolConstants.NowPlayingPosition)
         } else {
           listOf(
             codec.encode(
@@ -122,17 +97,22 @@ class MbrcProtocolAdapter(
       ProtocolConstants.NowPlayingDetails ->
         listOf(codec.encode(ProtocolConstants.NowPlayingDetails, detailsPayload(stateRepository.state.value)))
 
-      ProtocolConstants.PluginVersion ->
-        listOf(codec.encode(ProtocolConstants.PluginVersion, pluginVersion()))
-
       ProtocolConstants.NowPlayingList ->
-        listOf(codec.encode(ProtocolConstants.NowPlayingList, nowPlayingListPayload(stateRepository.state.value)))
+        listOf(
+          codec.encode(
+            ProtocolConstants.NowPlayingList,
+            nowPlayingListPayload(
+              stateRepository.state.value,
+              pageRequest(message.data)
+            )
+          )
+        )
 
       ProtocolConstants.NowPlayingQueue ->
         listOf(codec.encode(ProtocolConstants.NowPlayingQueue, mapOf("code" to 404)))
 
       ProtocolConstants.NowPlayingCover ->
-        listOf(codec.encode(ProtocolConstants.NowPlayingCover, mapOf("status" to 404, "cover" to null)))
+        listOf(codec.encode(ProtocolConstants.NowPlayingCover, powerampGateway.currentCoverPayload()))
 
       ProtocolConstants.NowPlayingLyrics ->
         listOf(codec.encode(ProtocolConstants.NowPlayingLyrics, mapOf("status" to 404, "lyrics" to "")))
@@ -143,7 +123,7 @@ class MbrcProtocolAdapter(
       ProtocolConstants.BrowseArtists,
       ProtocolConstants.BrowseAlbums,
       ProtocolConstants.BrowseTracks ->
-        listOf(codec.encode(message.context, emptyPage()))
+        listOf(codec.encode(message.context, emptyPage(pageRequest(message.data))))
 
       ProtocolConstants.LibraryCover ->
         listOf(codec.encode(ProtocolConstants.LibraryCover, mapOf("status" to 404, "cover" to null)))
@@ -162,17 +142,35 @@ class MbrcProtocolAdapter(
     }
   }
 
-  fun snapshotMessages(state: BridgeUiState): List<String> = listOf(
-    codec.encode(ProtocolConstants.PluginVersion, pluginVersion()),
-    codec.encode(ProtocolConstants.PlayerStatus, statusPayload(state)),
-    codec.encode(ProtocolConstants.PlayerState, state.playback.state),
-    codec.encode(ProtocolConstants.PlayerRepeat, state.playback.repeat),
-    codec.encode(ProtocolConstants.PlayerShuffle, state.playback.shuffle),
-    codec.encode(ProtocolConstants.PlayerVolume, state.playback.volume),
-    codec.encode(ProtocolConstants.NowPlayingTrack, trackPayload(state)),
-    codec.encode(ProtocolConstants.NowPlayingPosition, positionPayload(state)),
-    codec.encode(ProtocolConstants.NowPlayingDetails, detailsPayload(state))
-  )
+  fun snapshotMessages(
+    state: BridgeUiState,
+    includePosition: Boolean = true,
+    includeCover: Boolean = false
+  ): List<String> = buildList {
+    add(codec.encode(ProtocolConstants.PluginVersion, pluginVersion()))
+    add(codec.encode(ProtocolConstants.PlayerStatus, statusPayload(state)))
+    add(codec.encode(ProtocolConstants.PlayerState, state.playback.state))
+    add(codec.encode(ProtocolConstants.PlayerRepeat, state.playback.repeat))
+    add(codec.encode(ProtocolConstants.PlayerShuffle, state.playback.shuffle))
+    add(codec.encode(ProtocolConstants.PlayerVolume, state.playback.volume))
+    add(codec.encode(ProtocolConstants.NowPlayingTrack, trackPayload(state)))
+    if (includePosition) {
+      add(positionMessage(state))
+    }
+    add(codec.encode(ProtocolConstants.NowPlayingDetails, detailsPayload(state)))
+    if (includeCover) {
+      add(coverStatusMessage())
+    }
+  }
+
+  fun positionMessage(state: BridgeUiState): String =
+    codec.encode(ProtocolConstants.NowPlayingPosition, positionPayload(state))
+
+  fun coverStatusMessage(): String =
+    codec.encode(
+      ProtocolConstants.NowPlayingCover,
+      mapOf("status" to powerampGateway.currentCoverStatus(), "cover" to null)
+    )
 
   private fun pluginVersion(): String = "poweramp-bridge ${BuildConfig.VERSION_NAME}"
 
@@ -198,7 +196,10 @@ class MbrcProtocolAdapter(
     "total" to state.playback.track.durationMs
   )
 
-  private fun nowPlayingListPayload(state: BridgeUiState): Map<String, Any> {
+  private fun nowPlayingListPayload(
+    state: BridgeUiState,
+    request: PageRequest
+  ): Map<String, Any> {
     val track = state.playback.track
     val items = if (track.title.isBlank() && track.path.isBlank()) {
       emptyList()
@@ -212,11 +213,12 @@ class MbrcProtocolAdapter(
         )
       )
     }
+    val pageData = items.drop(request.offset).take(request.limit)
     return mapOf(
       "total" to items.size,
-      "offset" to 0,
-      "limit" to items.size.coerceAtLeast(1),
-      "data" to items
+      "offset" to request.offset,
+      "limit" to request.limit,
+      "data" to pageData
     )
   }
 
@@ -250,10 +252,10 @@ class MbrcProtocolAdapter(
     )
   }
 
-  private fun emptyPage(): Map<String, Any> = mapOf(
+  private fun emptyPage(request: PageRequest): Map<String, Any> = mapOf(
     "total" to 0,
-    "offset" to 0,
-    "limit" to 0,
+    "offset" to request.offset,
+    "limit" to request.limit,
     "data" to emptyList<Map<String, Any>>()
   )
 
@@ -280,11 +282,52 @@ class MbrcProtocolAdapter(
     else -> null
   }
 
+  private fun asLong(data: Any?): Long? = when (data) {
+    is Number -> data.toLong()
+    is String -> data.toLongOrNull()
+    is Map<*, *> -> {
+      val current = data["current"] ?: data["value"] ?: data["position"]
+      when (current) {
+        is Number -> current.toLong()
+        is String -> current.toLongOrNull()
+        else -> null
+      }
+    }
+    else -> null
+  }
+
+  private fun pageRequest(data: Any?): PageRequest {
+    if (data !is Map<*, *>) {
+      return PageRequest()
+    }
+
+    val offset = when (val raw = data["offset"]) {
+      is Number -> raw.toInt()
+      is String -> raw.toIntOrNull()
+      else -> null
+    } ?: 0
+
+    val limit = when (val raw = data["limit"]) {
+      is Number -> raw.toInt()
+      is String -> raw.toIntOrNull()
+      else -> null
+    } ?: DEFAULT_PAGE_LIMIT
+
+    return PageRequest(
+      offset = offset.coerceAtLeast(0),
+      limit = limit.coerceAtLeast(1)
+    )
+  }
+
   private fun dataAsString(data: Any?): String = when (data) {
     null -> ""
     is String -> data.lowercase()
     is Boolean -> if (data) "on" else "off"
     is Map<*, *> -> JSONObject(data).optString("value").lowercase()
     else -> data.toString().lowercase()
+  }
+
+  private companion object {
+    const val DEFAULT_PAGE_LIMIT = 800
   }
 }

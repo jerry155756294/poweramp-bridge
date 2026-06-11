@@ -5,7 +5,6 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
-import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -18,8 +17,6 @@ class BridgeSettingsRepository(
   val settings: Flow<BridgeSettings> = context.dataStore.data.map { preferences ->
     BridgeSettings(
       port = preferences[Keys.Port]?.takeIf { it in 1..65535 } ?: 3000,
-      sharedToken = preferences[Keys.SharedToken].orEmpty(),
-      requireTokenForRemote = preferences[Keys.RequireTokenForRemote] ?: false,
       autoStart = preferences[Keys.AutoStart] ?: false,
       startOnBoot = preferences[Keys.StartOnBoot] ?: false,
       foregroundPersistent = preferences[Keys.ForegroundPersistent] ?: true
@@ -28,14 +25,6 @@ class BridgeSettingsRepository(
 
   suspend fun updatePort(port: Int) {
     context.dataStore.edit { it[Keys.Port] = port.coerceIn(1, 65535) }
-  }
-
-  suspend fun updateSharedToken(value: String) {
-    context.dataStore.edit { it[Keys.SharedToken] = value.trim() }
-  }
-
-  suspend fun updateRequireTokenForRemote(enabled: Boolean) {
-    context.dataStore.edit { it[Keys.RequireTokenForRemote] = enabled }
   }
 
   suspend fun updateAutoStart(enabled: Boolean) {
@@ -52,9 +41,6 @@ class BridgeSettingsRepository(
 
   private object Keys {
     val Port: Preferences.Key<Int> = intPreferencesKey("port")
-    val SharedToken: Preferences.Key<String> = stringPreferencesKey("shared_token")
-    val RequireTokenForRemote: Preferences.Key<Boolean> =
-      booleanPreferencesKey("require_token_for_remote")
     val AutoStart: Preferences.Key<Boolean> = booleanPreferencesKey("auto_start")
     val StartOnBoot: Preferences.Key<Boolean> = booleanPreferencesKey("start_on_boot")
     val ForegroundPersistent: Preferences.Key<Boolean> =

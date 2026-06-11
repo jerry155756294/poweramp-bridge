@@ -1,12 +1,12 @@
 <resources>
   <string name="app_name">Poweramp Bridge</string>
   <string name="bridge_channel_name">Poweramp Bridge</string>
-  <string name="bridge_channel_description">MBRC 相容的 Poweramp TCP 橋接服務。</string>
-  <string name="bridge_notification_title">Poweramp Bridge 運作中</string>
-  <string name="bridge_notification_stopped">Bridge 已停止</string>
-  <string name="notification_no_track">目前沒有曲目</string>
+  <string name="bridge_channel_description">提供 MBRC 連到 Poweramp 的 TCP 橋接服務</string>
+  <string name="bridge_notification_title">Poweramp Bridge 執行中</string>
+  <string name="bridge_notification_stopped">Poweramp Bridge 已停止</string>
+  <string name="notification_no_track">目前沒有播放中的曲目</string>
   <string name="notification_stop">停止</string>
-  <string name="notification_restart">重啟</string>
+  <string name="notification_restart">重新啟動</string>
   <string name="tab_settings">設定</string>
   <string name="tab_status">狀態</string>
   <string name="tab_debug">除錯</string>
@@ -15,5 +15,13 @@
   <string name="poweramp_missing">找不到 Poweramp</string>
   <string name="poweramp_present">已偵測到 Poweramp</string>
   <string name="client_none">目前沒有連線中的 client</string>
-  <string name="token_optional">為了相容未修改的 MBRC，第一版 token 可留空或關閉。</string>
+  <string name="settings_network_title">網路</string>
+  <string name="settings_service_title">服務</string>
+  <string name="settings_no_token_notice">v1 不啟用 shared token，安全性依賴 LAN、Tailscale 與單一邏輯 client 限制。</string>
+  <string name="settings_auto_start">開啟 app 時自動啟動 Bridge</string>
+  <string name="settings_start_on_boot">開機後自動啟動 Bridge</string>
+  <string name="settings_foreground_persistent">保持前景服務通知</string>
+  <string name="settings_ip_title">目前可用 IP</string>
+  <string name="settings_ip_empty">目前尚未偵測到可用的網路位址</string>
+  <string name="settings_ip_hint">請在 MBRC 端輸入上方其中一個 IP 與這裡設定的 TCP Port。</string>
 </resources>

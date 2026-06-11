@@ -2,6 +2,7 @@ package com.jerry155756294.powerampbridge.protocol
 
 object ProtocolConstants {
   const val Player = "player"
+  const val PlayerName = "Poweramp Bridge"
   const val Protocol = "protocol"
   const val Init = "init"
   const val PluginVersion = "pluginversion"
