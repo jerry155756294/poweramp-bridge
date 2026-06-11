@@ -98,6 +98,10 @@ class ProtocolSessionManagerTest {
     assertEquals(true, result.replies.single().data)
     assertEquals("10.0.0.3", result.probeAddress)
     assertFalse(result.disconnect)
+    assertEquals(
+      ProtocolConstants.VerifyConnection,
+      manager.connectionDebugSnapshot("probe")?.lastIncomingContext
+    )
   }
 
   @Test
@@ -221,5 +225,29 @@ class ProtocolSessionManagerTest {
 
     assertTrue(prematureCommand.disconnect)
     assertNull(prematureCommand.delegateMessage)
+    assertEquals(
+      "protocol_violation_before_init",
+      prematureCommand.disconnectCategory
+    )
+  }
+
+  @Test
+  fun `last incoming and outgoing contexts are recorded`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.markOutgoingContext("broadcast", ProtocolConstants.Player)
+    manager.processMessage(
+      "broadcast",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.markOutgoingContext("broadcast", ProtocolConstants.Protocol)
+
+    val snapshot = manager.connectionDebugSnapshot("broadcast")
+    assertEquals(ProtocolConstants.Protocol, snapshot?.lastIncomingContext)
+    assertEquals(ProtocolConstants.Protocol, snapshot?.lastOutgoingContext)
   }
 }

@@ -92,6 +92,10 @@ class BridgeService : Service() {
         app.appContainer.stateRepository.recordProbe(remoteAddress)
       }
 
+      override suspend fun onProtocolEvent(message: String) {
+        app.appContainer.stateRepository.recordProtocolEvent(message)
+      }
+
       override suspend fun onConnectionRejected(snapshot: ConnectionDebugSnapshot, reason: String) {
         app.appContainer.stateRepository.recordRejectedConnection(snapshot.toEventSnapshot(), reason)
       }
@@ -339,9 +343,14 @@ class BridgeService : Service() {
 }
 
 private fun ConnectionDebugSnapshot.toEventSnapshot(): ConnectionEventSnapshot = ConnectionEventSnapshot(
+  socketId = socketId,
   remoteAddress = remoteAddress,
   clientId = clientId,
   role = role,
+  handshakeState = handshakeState.name.lowercase(),
   broadcastInitialized = broadcastInitialized,
-  requestSocketCount = requestSocketCount
+  requestSocketCount = requestSocketCount,
+  disconnectCategory = disconnectCategory,
+  lastIncomingContext = lastIncomingContext,
+  lastOutgoingContext = lastOutgoingContext
 )

@@ -209,10 +209,11 @@ private fun StatusTab(uiState: BridgeUiState) {
       StatusLine("協議版本", uiState.protocolVersion?.toString() ?: "未知")
       StatusLine("主 socket", socketStatus(uiState.broadcastSocketConnected, uiState.broadcastInitialized))
       StatusLine("請求 socket", uiState.activeRequestSocketCount.toString())
-      StatusLine("位置同步", if (uiState.positionSyncActive) "每秒推送中" else "閒置")
+      StatusLine("位置同步", if (uiState.positionSyncActive) "進行中" else "閒置")
       StatusLine("最近 verifyconnection", uiState.lastProbeAt ?: "尚無")
       StatusLine("最近拒絕", uiState.lastRejectedReason ?: "尚無")
       StatusLine("最近斷線", uiState.lastDisconnectReason ?: "尚無")
+      StatusLine("斷線摘要", formatDisconnectSummary(uiState))
     }
 
     SectionCard("Poweramp") {
@@ -250,6 +251,15 @@ private fun DebugTab(uiState: BridgeUiState) {
   ) {
     SectionCard("最後錯誤") {
       Text(uiState.lastError ?: "目前沒有錯誤")
+    }
+    SectionCard("最近協議事件") {
+      if (uiState.recentProtocolEvents.isEmpty()) {
+        Text("尚無")
+      } else {
+        uiState.recentProtocolEvents.forEach { entry ->
+          StatusLine(entry.timestamp, entry.message)
+        }
+      }
     }
     SectionCard("最近收到的命令") {
       if (uiState.recentCommands.isEmpty()) {
@@ -323,6 +333,16 @@ private fun socketStatus(connected: Boolean, initialized: Boolean): String = whe
   connected -> "已連線，等待 init"
   else -> "未連線"
 }
+
+private fun formatDisconnectSummary(uiState: BridgeUiState): String = buildList {
+  uiState.lastDisconnectCategory?.let { add("category=$it") }
+  uiState.lastDisconnectSocketRole?.let { add("role=$it") }
+  uiState.lastDisconnectHandshakeState?.let { add("handshake=$it") }
+  uiState.lastDisconnectLastCommand?.let { add("last_in=$it") }
+  uiState.lastDisconnectLastReply?.let { add("last_out=$it") }
+}.ifEmpty {
+  listOf("尚無")
+}.joinToString(" | ")
 
 @Composable
 private fun stringResourceSafe(id: Int): String = androidx.compose.ui.res.stringResource(id)

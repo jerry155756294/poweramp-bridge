@@ -31,13 +31,17 @@ data class LogicalClientSnapshot(
 )
 
 data class ConnectionDebugSnapshot(
+  val socketId: String,
   val remoteAddress: String,
   val clientId: String?,
   val role: SocketRole?,
   val handshakeState: HandshakeState,
   val protocolVersion: Int,
   val broadcastInitialized: Boolean,
-  val requestSocketCount: Int
+  val requestSocketCount: Int,
+  val disconnectCategory: String? = null,
+  val lastIncomingContext: String? = null,
+  val lastOutgoingContext: String? = null
 )
 
 data class OutgoingMessage(
@@ -50,6 +54,7 @@ data class ProtocolEngineResult(
   val delegateMessage: IncomingMessage? = null,
   val clientInfo: ProtocolClientInfo? = null,
   val disconnect: Boolean = false,
+  val disconnectCategory: String? = null,
   val socketsToClose: Set<String> = emptySet(),
   val sessionChanged: Boolean = false,
   val sessionSnapshot: LogicalClientSnapshot? = null,
@@ -76,6 +81,7 @@ class ProtocolSessionManager(
   fun processMessage(socketId: String, message: IncomingMessage): ProtocolEngineResult {
     val connection = connections[socketId]
       ?: return ProtocolEngineResult(disconnect = true)
+    connection.lastIncomingContext = message.context
 
     if (message.context == ProtocolConstants.VerifyConnection) {
       connection.role = SocketRole.PROBE
@@ -144,14 +150,26 @@ class ProtocolSessionManager(
     val connection = connections[socketId] ?: return null
     val session = logicalClient
     return ConnectionDebugSnapshot(
+      socketId = connection.socketId,
       remoteAddress = connection.remoteAddress,
       clientId = connection.clientId ?: session?.clientId,
       role = connection.role,
       handshakeState = connection.handshakeState,
       protocolVersion = connection.protocolVersion,
       broadcastInitialized = session?.broadcastInitialized ?: false,
-      requestSocketCount = session?.requestSocketIds?.size ?: 0
+      requestSocketCount = session?.requestSocketIds?.size ?: 0,
+      disconnectCategory = connection.disconnectCategory,
+      lastIncomingContext = connection.lastIncomingContext,
+      lastOutgoingContext = connection.lastOutgoingContext
     )
+  }
+
+  fun markOutgoingContext(socketId: String, context: String) {
+    connections[socketId]?.lastOutgoingContext = context
+  }
+
+  fun markDisconnectCategory(socketId: String, category: String) {
+    connections[socketId]?.disconnectCategory = category
   }
 
   private fun handleAwaitingPlayer(
@@ -159,7 +177,7 @@ class ProtocolSessionManager(
     message: IncomingMessage
   ): ProtocolEngineResult {
     if (message.context != ProtocolConstants.Player) {
-      return ProtocolEngineResult(disconnect = true)
+      return ProtocolEngineResult(disconnect = true, disconnectCategory = "protocol_violation_before_player")
     }
 
     connection.handshakeState = HandshakeState.AWAITING_PROTOCOL
@@ -173,7 +191,7 @@ class ProtocolSessionManager(
     message: IncomingMessage
   ): ProtocolEngineResult {
     if (message.context != ProtocolConstants.Protocol) {
-      return ProtocolEngineResult(disconnect = true)
+      return ProtocolEngineResult(disconnect = true, disconnectCategory = "protocol_violation_before_protocol")
     }
 
     val handshake = parseHandshake(message.data)
@@ -182,6 +200,7 @@ class ProtocolSessionManager(
       return ProtocolEngineResult(
         replies = listOf(OutgoingMessage(ProtocolConstants.NotAllowed, "single_client_only")),
         disconnect = true,
+        disconnectCategory = "single_client_only",
         rejectionReason = "single_client_only"
       )
     }
@@ -208,7 +227,7 @@ class ProtocolSessionManager(
     message: IncomingMessage
   ): ProtocolEngineResult {
     if (message.context != ProtocolConstants.Init) {
-      return ProtocolEngineResult(disconnect = true)
+      return ProtocolEngineResult(disconnect = true, disconnectCategory = "protocol_violation_before_init")
     }
 
     connection.handshakeState = HandshakeState.READY
@@ -356,7 +375,10 @@ class ProtocolSessionManager(
     var role: SocketRole? = null,
     var clientId: String? = null,
     var protocolVersion: Int = ProtocolConstants.ProtocolVersion,
-    var handshakeState: HandshakeState = HandshakeState.AWAITING_PLAYER
+    var handshakeState: HandshakeState = HandshakeState.AWAITING_PLAYER,
+    var disconnectCategory: String? = null,
+    var lastIncomingContext: String? = null,
+    var lastOutgoingContext: String? = null
   ) {
     fun toClientInfo(): ProtocolClientInfo = ProtocolClientInfo(
       remoteAddress = remoteAddress,

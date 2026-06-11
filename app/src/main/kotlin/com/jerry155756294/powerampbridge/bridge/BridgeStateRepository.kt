@@ -41,7 +41,14 @@ class BridgeStateRepository {
 
   fun recordDisconnect(event: ConnectionEventSnapshot, reason: String) {
     _state.update {
-      it.copy(lastDisconnectReason = event.format(reason))
+      it.copy(
+        lastDisconnectReason = event.format(reason),
+        lastDisconnectCategory = event.disconnectCategory ?: reason,
+        lastDisconnectSocketRole = event.role?.name?.lowercase(),
+        lastDisconnectHandshakeState = event.handshakeState,
+        lastDisconnectLastCommand = event.lastIncomingContext,
+        lastDisconnectLastReply = event.lastOutgoingContext
+      )
     }
   }
 
@@ -87,6 +94,10 @@ class BridgeStateRepository {
 
   fun recordCommand(message: String) {
     _state.update { it.copy(recentCommands = addEntry(it.recentCommands, message)) }
+  }
+
+  fun recordProtocolEvent(message: String) {
+    _state.update { it.copy(recentProtocolEvents = addEntry(it.recentProtocolEvents, message)) }
   }
 
   fun recordPowerampEvent(message: String) {
