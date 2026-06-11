@@ -30,6 +30,7 @@ class MbrcProtocolServer(
     suspend fun onSessionChanged(snapshot: LogicalClientSnapshot?)
     suspend fun onProbe(remoteAddress: String)
     suspend fun onConnectionRejected(remoteAddress: String, reason: String)
+    suspend fun onConnectionClosed(remoteAddress: String, reason: String)
   }
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -52,6 +53,8 @@ class MbrcProtocolServer(
         } catch (_: Exception) {
           null
         } ?: break
+        socket.keepAlive = true
+        socket.tcpNoDelay = true
 
         val socketId = UUID.randomUUID().toString()
         val remoteAddress = socket.inetAddress?.hostAddress.orEmpty()
@@ -90,6 +93,7 @@ class MbrcProtocolServer(
     remoteAddress: String,
     session: ClientSession
   ) {
+    var closeReason = "peer_closed"
     try {
       while (true) {
         val line = session.reader.readLine() ?: break
@@ -120,6 +124,7 @@ class MbrcProtocolServer(
         if (result.disconnect) break
       }
     } catch (error: Exception) {
+      closeReason = error.message ?: error.javaClass.simpleName
       Timber.w(error, "Client loop ended for %s", remoteAddress)
     } finally {
       val disconnectResult = mutex.withLock {
@@ -127,6 +132,7 @@ class MbrcProtocolServer(
         protocolManager.disconnect(socketId)
       }
       session.close()
+      listener.onConnectionClosed(remoteAddress, closeReason)
       if (disconnectResult.sessionChanged) {
         listener.onSessionChanged(disconnectResult.sessionSnapshot)
       }

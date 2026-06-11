@@ -22,6 +22,7 @@ import com.jerry155756294.powerampbridge.protocol.MbrcProtocolAdapter
 import com.jerry155756294.powerampbridge.protocol.MbrcProtocolServer
 import com.jerry155756294.powerampbridge.protocol.ProtocolClientInfo
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -38,9 +39,12 @@ class BridgeService : Service() {
   private lateinit var server: MbrcProtocolServer
   private var settingsJob: Job? = null
   private var stateJob: Job? = null
+  private var positionSyncJob: Job? = null
   private var activeSettings = BridgeSettings()
   private var startedPort: Int? = null
-  private var lastBroadcastPayload: List<String>? = null
+  private var lastStatusBroadcastPayload: List<String>? = null
+  private var lastBroadcastPositionMs: Long? = null
+  private var lastCoverSignalTrackId: Long? = null
 
   override fun onCreate() {
     super.onCreate()
@@ -58,14 +62,28 @@ class BridgeService : Service() {
       ): List<String> = adapter.handleCommand(message)
 
       override suspend fun onBroadcastReady(clientInfo: ProtocolClientInfo): List<String> =
-        adapter.snapshotMessages(app.appContainer.stateRepository.state.value).also {
-          lastBroadcastPayload = it
+        adapter.snapshotMessages(
+          app.appContainer.stateRepository.state.value,
+          includePosition = true,
+          includeCover = true
+        ).also {
+          val state = app.appContainer.stateRepository.state.value
+          lastStatusBroadcastPayload = adapter.snapshotMessages(
+            state,
+            includePosition = false,
+            includeCover = false
+          )
+          lastBroadcastPositionMs = state.playback.track.positionMs
+          lastCoverSignalTrackId = state.playback.track.realId
         }
 
       override suspend fun onSessionChanged(snapshot: LogicalClientSnapshot?) {
         app.appContainer.stateRepository.updateSession(snapshot)
         if (snapshot?.broadcastInitialized != true) {
-          lastBroadcastPayload = null
+          stopPositionTicker()
+          lastStatusBroadcastPayload = null
+          lastBroadcastPositionMs = null
+          lastCoverSignalTrackId = null
         }
       }
 
@@ -75,6 +93,10 @@ class BridgeService : Service() {
 
       override suspend fun onConnectionRejected(remoteAddress: String, reason: String) {
         app.appContainer.stateRepository.recordRejectedConnection(remoteAddress, reason)
+      }
+
+      override suspend fun onConnectionClosed(remoteAddress: String, reason: String) {
+        app.appContainer.stateRepository.recordDisconnect(remoteAddress, reason)
       }
     })
 
@@ -100,6 +122,7 @@ class BridgeService : Service() {
   override fun onDestroy() {
     settingsJob?.cancel()
     stateJob?.cancel()
+    positionSyncJob?.cancel()
     runBlocking { server.stop() }
     powerampGateway.stop()
     app.appContainer.stateRepository.setServiceRunning(false)
@@ -139,19 +162,86 @@ class BridgeService : Service() {
       app.appContainer.stateRepository.state.collectLatest { state ->
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, buildNotification(state))
+        syncPositionTicker(state)
 
-        if (state.broadcastInitialized) {
-          val payload = adapter.snapshotMessages(state)
-          if (payload == lastBroadcastPayload) {
-            return@collectLatest
+        if (!state.broadcastInitialized) {
+          return@collectLatest
+        }
+
+        val statusPayload = adapter.snapshotMessages(
+          state,
+          includePosition = false,
+          includeCover = false
+        )
+        val shouldSendCoverSignal =
+          state.playback.track.realId != lastCoverSignalTrackId &&
+            (state.playback.track.realId > 0L || lastCoverSignalTrackId != null)
+
+        val messages = buildList {
+          if (statusPayload != lastStatusBroadcastPayload) {
+            addAll(statusPayload)
           }
-          lastBroadcastPayload = payload
+          if (lastBroadcastPositionMs != state.playback.track.positionMs) {
+            add(adapter.positionMessage(state))
+          }
+          if (shouldSendCoverSignal) {
+            add(adapter.coverStatusMessage())
+          }
+        }
+
+        if (messages.isNotEmpty()) {
+          lastStatusBroadcastPayload = statusPayload
+          lastBroadcastPositionMs = state.playback.track.positionMs
+          if (shouldSendCoverSignal) {
+            lastCoverSignalTrackId = state.playback.track.realId
+          }
           launch(Dispatchers.IO) {
-            server.sendBroadcast(payload)
+            server.sendBroadcast(messages)
           }
         }
       }
     }
+  }
+
+  private fun syncPositionTicker(state: BridgeUiState) {
+    val shouldRun = state.broadcastInitialized && state.playback.state == "playing"
+    if (!shouldRun) {
+      stopPositionTicker()
+      return
+    }
+
+    if (positionSyncJob?.isActive == true) {
+      return
+    }
+
+    app.appContainer.stateRepository.setPositionSyncActive(true)
+    positionSyncJob = scope.launch(Dispatchers.IO) {
+      var tickCount = 0
+      while (true) {
+        delay(POSITION_TICK_MS)
+        val current = app.appContainer.stateRepository.state.value
+        if (!current.broadcastInitialized || current.playback.state != "playing") {
+          break
+        }
+
+        app.appContainer.stateRepository.tickPlaybackPosition(POSITION_TICK_MS)
+        val updated = app.appContainer.stateRepository.state.value
+        server.sendBroadcast(listOf(adapter.positionMessage(updated)))
+        lastBroadcastPositionMs = updated.playback.track.positionMs
+
+        tickCount += 1
+        if (tickCount % POSITION_RESYNC_INTERVAL == 0) {
+          powerampGateway.requestPositionSync()
+        }
+      }
+      app.appContainer.stateRepository.setPositionSyncActive(false)
+    }
+  }
+
+  private fun stopPositionTicker() {
+    positionSyncJob?.cancel()
+    positionSyncJob = null
+    app.appContainer.stateRepository.setPositionSyncActive(false)
   }
 
   private fun buildNotification(state: BridgeUiState): Notification {
@@ -192,7 +282,7 @@ class BridgeService : Service() {
         }
       )
       if (state.requestSocketConnected) {
-        add("Request socket connected")
+        add("Request ${state.activeRequestSocketCount}")
       }
     }.joinToString(" | ")
 
@@ -227,6 +317,8 @@ class BridgeService : Service() {
   companion object {
     private const val CHANNEL_ID = "poweramp_bridge"
     private const val NOTIFICATION_ID = 1001
+    private const val POSITION_TICK_MS = 1000L
+    private const val POSITION_RESYNC_INTERVAL = 5
     private const val ACTION_STOP = "com.jerry155756294.powerampbridge.action.STOP"
     private const val ACTION_RESTART = "com.jerry155756294.powerampbridge.action.RESTART"
 

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioManager
 import android.os.Bundle
+import android.util.Base64
 import androidx.core.content.ContextCompat
 import com.maxmpz.poweramp.player.PowerampAPI
 import com.maxmpz.poweramp.player.PowerampAPIHelper
@@ -18,14 +19,18 @@ class PowerampGateway(
     context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
   private var registered = false
+  private var cachedCover: CachedCover? = null
 
   private val receiver = object : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
       when (intent.action) {
         PowerampAPI.ACTION_TRACK_CHANGED -> handleTrack(intent)
+        PowerampAPI.ACTION_TRACK_CHANGED_EXPLICIT -> handleTrack(intent)
         PowerampAPI.ACTION_STATUS_CHANGED -> handleStatus(intent)
+        PowerampAPI.ACTION_STATUS_CHANGED_EXPLICIT -> handleStatus(intent)
         PowerampAPI.ACTION_PLAYING_MODE_CHANGED -> handlePlayingMode(intent)
         PowerampAPI.ACTION_TRACK_POS_SYNC -> handlePosition(intent)
+        PowerampAPI.ACTION_AA_CHANGED -> invalidateCoverCache()
       }
     }
   }
@@ -35,9 +40,12 @@ class PowerampGateway(
     refreshAvailability()
     val filter = IntentFilter().apply {
       addAction(PowerampAPI.ACTION_TRACK_CHANGED)
+      addAction(PowerampAPI.ACTION_TRACK_CHANGED_EXPLICIT)
       addAction(PowerampAPI.ACTION_STATUS_CHANGED)
+      addAction(PowerampAPI.ACTION_STATUS_CHANGED_EXPLICIT)
       addAction(PowerampAPI.ACTION_PLAYING_MODE_CHANGED)
       addAction(PowerampAPI.ACTION_TRACK_POS_SYNC)
+      addAction(PowerampAPI.ACTION_AA_CHANGED)
     }
     ContextCompat.registerReceiver(
       context,
@@ -69,6 +77,22 @@ class PowerampGateway(
     sendCommand(PowerampAPI.Commands.POS_SYNC)
   }
 
+  fun refreshVolumeSnapshot() {
+    updateVolumeSnapshot()
+  }
+
+  fun currentCoverStatus(): Int =
+    if (currentCoverBase64() != null) READY_COVER_STATUS else NOT_FOUND_COVER_STATUS
+
+  fun currentCoverPayload(): Map<String, Any?> {
+    val cover = currentCoverBase64()
+    return if (cover != null) {
+      mapOf("status" to SUCCESS_COVER_STATUS, "cover" to cover)
+    } else {
+      mapOf("status" to NOT_FOUND_COVER_STATUS, "cover" to null)
+    }
+  }
+
   fun playPause(): Boolean = sendCommand(PowerampAPI.Commands.TOGGLE_PLAY_PAUSE)
   fun play(): Boolean = sendCommand(PowerampAPI.Commands.PLAY)
   fun pause(): Boolean = sendCommand(PowerampAPI.Commands.PAUSE)
@@ -82,13 +106,21 @@ class PowerampGateway(
     }
 
   fun setShuffle(mode: String): Boolean {
-    val shuffleMode = when (mode.lowercase()) {
-      "shuffle", "on" -> PowerampAPI.ShuffleMode.SHUFFLE_ALL
+    val normalized = when (mode.lowercase()) {
+      "shuffle", "on" -> "shuffle"
+      else -> "off"
+    }
+    val shuffleMode = when (normalized) {
+      "shuffle" -> PowerampAPI.ShuffleMode.SHUFFLE_ALL
       else -> PowerampAPI.ShuffleMode.SHUFFLE_NONE
     }
-    return sendCommand(PowerampAPI.Commands.SHUFFLE) {
+    val success = sendCommand(PowerampAPI.Commands.SHUFFLE) {
       it.putExtra(PowerampAPI.EXTRA_SHUFFLE, shuffleMode)
     }
+    if (success) {
+      stateRepository.updatePlayback { it.copy(shuffle = normalized) }
+    }
+    return success
   }
 
   fun toggleShuffle(): Boolean {
@@ -97,14 +129,23 @@ class PowerampGateway(
   }
 
   fun setRepeat(mode: String): Boolean {
-    val repeatMode = when (mode.lowercase()) {
+    val normalized = when (mode.lowercase()) {
+      "all" -> "all"
+      "one" -> "one"
+      else -> "none"
+    }
+    val repeatMode = when (normalized) {
       "all" -> PowerampAPI.RepeatMode.REPEAT_ON
-      "one" -> PowerampAPI.RepeatMode.REPEAT_ADVANCE
+      "one" -> PowerampAPI.RepeatMode.REPEAT_SONG
       else -> PowerampAPI.RepeatMode.REPEAT_NONE
     }
-    return sendCommand(PowerampAPI.Commands.REPEAT) {
+    val success = sendCommand(PowerampAPI.Commands.REPEAT) {
       it.putExtra(PowerampAPI.EXTRA_REPEAT, repeatMode)
     }
+    if (success) {
+      stateRepository.updatePlayback { it.copy(repeat = normalized) }
+    }
+    return success
   }
 
   fun toggleRepeat(): Boolean {
@@ -135,9 +176,12 @@ class PowerampGateway(
   private fun handleTrack(intent: Intent) {
     val track = intent.getBundleExtra(PowerampAPI.EXTRA_TRACK) ?: return
     val positionSec = intent.getIntExtra(PowerampAPI.Track.POSITION, -1)
+    val realId = track.getLong(PowerampAPI.Track.REAL_ID, 0L)
+    invalidateCoverCacheIfNeeded(realId)
     stateRepository.updatePlayback { playback ->
       playback.copy(
         track = playback.track.copy(
+          realId = realId,
           title = track.getString(PowerampAPI.Track.TITLE).orEmpty(),
           artist = track.getString(PowerampAPI.Track.ARTIST).orEmpty(),
           album = track.getString(PowerampAPI.Track.ALBUM).orEmpty(),
@@ -155,6 +199,7 @@ class PowerampGateway(
         )
       )
     }
+    requestPositionSync()
     stateRepository.recordPowerampEvent(
       "Track changed: ${track.getString(PowerampAPI.Track.TITLE).orEmpty()}"
     )
@@ -177,6 +222,9 @@ class PowerampGateway(
         )
       )
     }
+    if (state == "playing") {
+      requestPositionSync()
+    }
     updateVolumeSnapshot()
     stateRepository.recordPowerampEvent("Status changed: $state")
   }
@@ -184,7 +232,7 @@ class PowerampGateway(
   private fun handlePlayingMode(intent: Intent) {
     val repeat = when (intent.getIntExtra(PowerampAPI.EXTRA_REPEAT, -1)) {
       PowerampAPI.RepeatMode.REPEAT_ON -> "all"
-      PowerampAPI.RepeatMode.REPEAT_ADVANCE -> "one"
+      PowerampAPI.RepeatMode.REPEAT_SONG -> "one"
       else -> "none"
     }
     val shuffle = when (intent.getIntExtra(PowerampAPI.EXTRA_SHUFFLE, -1)) {
@@ -222,4 +270,47 @@ class PowerampGateway(
 
   private fun bundleString(bundle: Bundle, key: String): String =
     if (bundle.containsKey(key)) bundle.get(key)?.toString().orEmpty() else ""
+
+  private fun invalidateCoverCacheIfNeeded(realId: Long) {
+    if (cachedCover?.realId != realId) {
+      cachedCover = null
+    }
+  }
+
+  private fun invalidateCoverCache() {
+    cachedCover = null
+  }
+
+  private fun currentCoverBase64(): String? {
+    val realId = stateRepository.state.value.playback.track.realId
+    if (realId <= 0L) {
+      return null
+    }
+
+    cachedCover?.takeIf { it.realId == realId }?.let { return it.base64 }
+
+    val base64 = runCatching {
+      val uri = PowerampAPI.AA_ROOT_URI.buildUpon()
+        .appendEncodedPath("files")
+        .appendEncodedPath(realId.toString())
+        .build()
+      context.contentResolver.openInputStream(uri)?.use { stream ->
+        Base64.encodeToString(stream.readBytes(), Base64.NO_WRAP)
+      }
+    }.getOrNull()
+
+    cachedCover = CachedCover(realId = realId, base64 = base64)
+    return base64
+  }
+
+  private data class CachedCover(
+    val realId: Long,
+    val base64: String?
+  )
+
+  private companion object {
+    const val READY_COVER_STATUS = 1
+    const val SUCCESS_COVER_STATUS = 200
+    const val NOT_FOUND_COVER_STATUS = 404
+  }
 }

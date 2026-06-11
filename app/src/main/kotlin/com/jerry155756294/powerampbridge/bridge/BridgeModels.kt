@@ -6,6 +6,7 @@ import java.util.Date
 import java.util.Locale
 
 data class TrackSnapshot(
+  val realId: Long = 0L,
   val title: String = "",
   val artist: String = "",
   val album: String = "",
@@ -58,9 +59,12 @@ data class BridgeUiState(
   val protocolVersion: Int? = null,
   val broadcastSocketConnected: Boolean = false,
   val broadcastInitialized: Boolean = false,
+  val activeRequestSocketCount: Int = 0,
   val requestSocketConnected: Boolean = false,
   val lastProbeAt: String? = null,
   val lastRejectedReason: String? = null,
+  val lastDisconnectReason: String? = null,
+  val positionSyncActive: Boolean = false,
   val playback: PlaybackSnapshot = PlaybackSnapshot(),
   val recentCommands: List<LogEntry> = emptyList(),
   val recentPowerampEvents: List<LogEntry> = emptyList(),
@@ -74,5 +78,6 @@ internal fun BridgeUiState.withSession(snapshot: LogicalClientSnapshot?): Bridge
     protocolVersion = snapshot?.protocolVersion,
     broadcastSocketConnected = snapshot?.broadcastSocketConnected ?: false,
     broadcastInitialized = snapshot?.broadcastInitialized ?: false,
+    activeRequestSocketCount = snapshot?.requestSocketCount ?: 0,
     requestSocketConnected = snapshot?.requestSocketConnected ?: false
   )

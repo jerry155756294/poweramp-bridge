@@ -26,6 +26,7 @@ data class LogicalClientSnapshot(
   val protocolVersion: Int?,
   val broadcastSocketConnected: Boolean,
   val broadcastInitialized: Boolean,
+  val requestSocketCount: Int,
   val requestSocketConnected: Boolean
 )
 
@@ -68,7 +69,7 @@ class ProtocolSessionManager(
     if (message.context == ProtocolConstants.VerifyConnection) {
       connection.role = SocketRole.PROBE
       return ProtocolEngineResult(
-        replies = listOf(OutgoingMessage(ProtocolConstants.VerifyConnection, "")),
+        replies = listOf(OutgoingMessage(ProtocolConstants.VerifyConnection, true)),
         probeAddress = connection.remoteAddress
       )
     }
@@ -102,12 +103,17 @@ class ProtocolSessionManager(
       changed = true
     }
 
-    if (currentSession.requestSocketId == connection.socketId) {
-      updatedSession = updatedSession.copy(requestSocketId = null)
+    if (connection.socketId in currentSession.requestSocketIds) {
+      updatedSession = updatedSession.copy(
+        requestSocketIds = currentSession.requestSocketIds - connection.socketId
+      )
       changed = true
     }
 
-    logicalClient = if (updatedSession.broadcastSocketId == null && updatedSession.requestSocketId == null) {
+    logicalClient = if (
+      updatedSession.broadcastSocketId == null &&
+      updatedSession.requestSocketIds.isEmpty()
+    ) {
       null
     } else {
       updatedSession
@@ -212,7 +218,7 @@ class ProtocolSessionManager(
         clientId = requestedClientId,
         protocolVersion = handshake.protocolVersion,
         broadcastSocketId = if (role == SocketRole.BROADCAST) connection.socketId else null,
-        requestSocketId = if (role == SocketRole.REQUEST) connection.socketId else null,
+        requestSocketIds = if (role == SocketRole.REQUEST) setOf(connection.socketId) else emptySet(),
         broadcastInitialized = false
       )
       return ProtocolClientInfo(
@@ -223,19 +229,11 @@ class ProtocolSessionManager(
       )
     }
 
-    if (currentSession.remoteAddress != connection.remoteAddress) {
-      return null
-    }
-
-    if (requestedClientId != null && currentSession.clientId != null && currentSession.clientId != requestedClientId) {
+    if (!matchesCurrentSender(currentSession, connection.remoteAddress, requestedClientId)) {
       return null
     }
 
     if (role == SocketRole.BROADCAST && currentSession.broadcastSocketId != null) {
-      return null
-    }
-
-    if (role == SocketRole.REQUEST && currentSession.requestSocketId != null) {
       return null
     }
 
@@ -244,7 +242,11 @@ class ProtocolSessionManager(
       clientId = effectiveClientId,
       protocolVersion = handshake.protocolVersion,
       broadcastSocketId = if (role == SocketRole.BROADCAST) connection.socketId else currentSession.broadcastSocketId,
-      requestSocketId = if (role == SocketRole.REQUEST) connection.socketId else currentSession.requestSocketId
+      requestSocketIds = if (role == SocketRole.REQUEST) {
+        currentSession.requestSocketIds + connection.socketId
+      } else {
+        currentSession.requestSocketIds
+      }
     )
 
     return ProtocolClientInfo(
@@ -288,6 +290,19 @@ class ProtocolSessionManager(
     else -> false
   }
 
+  private fun matchesCurrentSender(
+    currentSession: LogicalClientSession,
+    remoteAddress: String,
+    requestedClientId: String?
+  ): Boolean {
+    val currentClientId = currentSession.clientId
+    return if (currentClientId != null && requestedClientId != null) {
+      currentClientId == requestedClientId
+    } else {
+      currentSession.remoteAddress == remoteAddress
+    }
+  }
+
   private data class ParsedHandshake(
     val protocolVersion: Int,
     val noBroadcast: Boolean,
@@ -315,7 +330,7 @@ class ProtocolSessionManager(
     val clientId: String?,
     val protocolVersion: Int?,
     val broadcastSocketId: String?,
-    val requestSocketId: String?,
+    val requestSocketIds: Set<String>,
     val broadcastInitialized: Boolean
   ) {
     fun toSnapshot(): LogicalClientSnapshot = LogicalClientSnapshot(
@@ -324,7 +339,8 @@ class ProtocolSessionManager(
       protocolVersion = protocolVersion,
       broadcastSocketConnected = broadcastSocketId != null,
       broadcastInitialized = broadcastInitialized,
-      requestSocketConnected = requestSocketId != null
+      requestSocketCount = requestSocketIds.size,
+      requestSocketConnected = requestSocketIds.isNotEmpty()
     )
   }
 }

@@ -202,15 +202,17 @@ private fun StatusTab(uiState: BridgeUiState) {
   ) {
     SectionCard("Bridge") {
       StatusLine("服務", if (uiState.serviceRunning) "執行中" else "已停止")
-      StatusLine("Listener", if (uiState.listenerActive) "TCP ${uiState.listenPort}" else "未監聽")
-      StatusLine("本機位址", uiState.localAddresses.firstOrNull() ?: stringResourceSafe(R.string.settings_ip_empty))
+      StatusLine("Listener", if (uiState.listenerActive) "TCP ${uiState.listenPort}" else "未啟動")
+      StatusLine("目前 IP", uiState.localAddresses.firstOrNull() ?: stringResourceSafe(R.string.settings_ip_empty))
       StatusLine("Client IP", uiState.activeClient ?: stringResourceSafe(R.string.client_none))
       StatusLine("Client ID", uiState.clientId ?: "未提供")
       StatusLine("協議版本", uiState.protocolVersion?.toString() ?: "未知")
       StatusLine("主 socket", socketStatus(uiState.broadcastSocketConnected, uiState.broadcastInitialized))
-      StatusLine("請求 socket", if (uiState.requestSocketConnected) "已連線" else "未連線")
-      StatusLine("最近 verifyconnection", uiState.lastProbeAt ?: "尚無紀錄")
-      StatusLine("最近拒絕", uiState.lastRejectedReason ?: "尚無紀錄")
+      StatusLine("請求 socket", uiState.activeRequestSocketCount.toString())
+      StatusLine("位置同步", if (uiState.positionSyncActive) "每秒推送中" else "閒置")
+      StatusLine("最近 verifyconnection", uiState.lastProbeAt ?: "尚無")
+      StatusLine("最近拒絕", uiState.lastRejectedReason ?: "尚無")
+      StatusLine("最近斷線", uiState.lastDisconnectReason ?: "尚無")
     }
 
     SectionCard("Poweramp") {
@@ -251,7 +253,7 @@ private fun DebugTab(uiState: BridgeUiState) {
     }
     SectionCard("最近收到的命令") {
       if (uiState.recentCommands.isEmpty()) {
-        Text("尚無紀錄")
+        Text("尚無")
       } else {
         uiState.recentCommands.forEach { entry ->
           StatusLine(entry.timestamp, entry.message)
@@ -260,7 +262,7 @@ private fun DebugTab(uiState: BridgeUiState) {
     }
     SectionCard("最近 Poweramp 事件") {
       if (uiState.recentPowerampEvents.isEmpty()) {
-        Text("尚無紀錄")
+        Text("尚無")
       } else {
         uiState.recentPowerampEvents.forEach { entry ->
           StatusLine(entry.timestamp, entry.message)
@@ -318,7 +320,7 @@ private fun StatusLine(label: String, value: String) {
 
 private fun socketStatus(connected: Boolean, initialized: Boolean): String = when {
   initialized -> "已完成 init"
-  connected -> "已握手，等待 init"
+  connected -> "已連線，等待 init"
   else -> "未連線"
 }
 

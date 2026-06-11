@@ -40,6 +40,13 @@ class BridgeStateRepository {
     }
   }
 
+  fun recordDisconnect(remoteAddress: String, reason: String) {
+    val timestamp = LogEntry.timestampNow()
+    _state.update {
+      it.copy(lastDisconnectReason = "$timestamp ($remoteAddress): $reason")
+    }
+  }
+
   fun setPowerampAvailable(available: Boolean) {
     _state.update {
       it.copy(
@@ -53,6 +60,31 @@ class BridgeStateRepository {
     _state.update { current ->
       current.copy(playback = transform(current.playback))
     }
+  }
+
+  fun tickPlaybackPosition(stepMs: Long) {
+    _state.update { current ->
+      if (current.playback.state != "playing") {
+        return@update current
+      }
+
+      val track = current.playback.track
+      val nextPosition = if (track.durationMs > 0L) {
+        (track.positionMs + stepMs).coerceAtMost(track.durationMs)
+      } else {
+        track.positionMs + stepMs
+      }
+
+      current.copy(
+        playback = current.playback.copy(
+          track = track.copy(positionMs = nextPosition)
+        )
+      )
+    }
+  }
+
+  fun setPositionSyncActive(active: Boolean) {
+    _state.update { it.copy(positionSyncActive = active) }
   }
 
   fun recordCommand(message: String) {

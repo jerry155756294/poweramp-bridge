@@ -74,6 +74,7 @@ class ProtocolSessionManagerTest {
     assertTrue(requestProtocolResult.sessionChanged)
     assertTrue(requestProtocolResult.sessionSnapshot?.broadcastSocketConnected == true)
     assertTrue(requestProtocolResult.sessionSnapshot?.requestSocketConnected == true)
+    assertEquals(1, requestProtocolResult.sessionSnapshot?.requestSocketCount)
     assertFalse(requestProtocolResult.sendInitialSnapshot)
 
     val commandResult = manager.processMessage(
@@ -94,8 +95,39 @@ class ProtocolSessionManagerTest {
     )
 
     assertEquals(ProtocolConstants.VerifyConnection, result.replies.single().context)
+    assertEquals(true, result.replies.single().data)
     assertEquals("10.0.0.3", result.probeAddress)
     assertFalse(result.disconnect)
+  }
+
+  @Test
+  fun `same logical client can open multiple request sockets`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Init, null))
+
+    repeat(2) { index ->
+      val socketId = "request-$index"
+      manager.registerConnection(socketId, "10.0.0.2")
+      manager.processMessage(socketId, IncomingMessage(ProtocolConstants.Player, "Android"))
+      val protocolResult = manager.processMessage(
+        socketId,
+        IncomingMessage(
+          ProtocolConstants.Protocol,
+          mapOf("protocol_version" to 4, "no_broadcast" to true, "client_id" to "sender-1")
+        )
+      )
+
+      assertFalse(protocolResult.disconnect)
+      assertEquals(index + 1, protocolResult.sessionSnapshot?.requestSocketCount)
+    }
   }
 
   @Test
