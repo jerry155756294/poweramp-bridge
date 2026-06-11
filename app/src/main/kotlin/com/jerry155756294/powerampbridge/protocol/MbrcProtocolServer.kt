@@ -106,15 +106,15 @@ class MbrcProtocolServer(
         result.probeAddress?.let { listener.onProbe(it) }
         result.rejectionReason?.let { listener.onConnectionRejected(remoteAddress, it) }
 
-        sendReplies(session, result.replies)
+        sendProtocolReplies(session, result.replies)
 
         if (result.sendInitialSnapshot && result.clientInfo != null) {
-          sendReplies(session, listener.onBroadcastReady(result.clientInfo))
+          sendEncodedReplies(session, listener.onBroadcastReady(result.clientInfo))
         }
 
         if (result.delegateMessage != null && result.clientInfo != null) {
           val replies = listener.onCommand(result.clientInfo, result.delegateMessage)
-          sendReplies(session, replies)
+          sendEncodedReplies(session, replies)
         }
 
         if (result.disconnect) break
@@ -133,7 +133,7 @@ class MbrcProtocolServer(
     }
   }
 
-  private suspend fun sendReplies(
+  private suspend fun sendProtocolReplies(
     session: ClientSession,
     replies: List<OutgoingMessage>
   ) {
@@ -142,7 +142,7 @@ class MbrcProtocolServer(
     }
   }
 
-  private suspend fun sendReplies(
+  private suspend fun sendEncodedReplies(
     session: ClientSession,
     replies: List<String>
   ) {
