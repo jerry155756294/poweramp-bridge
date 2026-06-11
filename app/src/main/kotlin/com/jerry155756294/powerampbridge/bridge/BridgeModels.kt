@@ -1,6 +1,7 @@
 package com.jerry155756294.powerampbridge.bridge
 
 import com.jerry155756294.powerampbridge.protocol.LogicalClientSnapshot
+import com.jerry155756294.powerampbridge.protocol.SocketRole
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -48,6 +49,14 @@ data class LogEntry(
   }
 }
 
+data class ConnectionEventSnapshot(
+  val remoteAddress: String,
+  val clientId: String?,
+  val role: SocketRole?,
+  val broadcastInitialized: Boolean,
+  val requestSocketCount: Int
+)
+
 data class BridgeUiState(
   val serviceRunning: Boolean = false,
   val listenerActive: Boolean = false,
@@ -81,3 +90,11 @@ internal fun BridgeUiState.withSession(snapshot: LogicalClientSnapshot?): Bridge
     activeRequestSocketCount = snapshot?.requestSocketCount ?: 0,
     requestSocketConnected = snapshot?.requestSocketConnected ?: false
   )
+
+internal fun ConnectionEventSnapshot.format(reason: String): String = buildList {
+  add("${LogEntry.timestampNow()} ($remoteAddress): $reason")
+  role?.let { add("role=${it.name.lowercase()}") }
+  clientId?.takeIf { it.isNotBlank() }?.let { add("client_id=$it") }
+  add("broadcast_initialized=$broadcastInitialized")
+  add("request_count=$requestSocketCount")
+}.joinToString(" | ")

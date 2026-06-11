@@ -30,6 +30,16 @@ data class LogicalClientSnapshot(
   val requestSocketConnected: Boolean
 )
 
+data class ConnectionDebugSnapshot(
+  val remoteAddress: String,
+  val clientId: String?,
+  val role: SocketRole?,
+  val handshakeState: HandshakeState,
+  val protocolVersion: Int,
+  val broadcastInitialized: Boolean,
+  val requestSocketCount: Int
+)
+
 data class OutgoingMessage(
   val context: String,
   val data: Any? = ""
@@ -40,6 +50,7 @@ data class ProtocolEngineResult(
   val delegateMessage: IncomingMessage? = null,
   val clientInfo: ProtocolClientInfo? = null,
   val disconnect: Boolean = false,
+  val socketsToClose: Set<String> = emptySet(),
   val sessionChanged: Boolean = false,
   val sessionSnapshot: LogicalClientSnapshot? = null,
   val probeAddress: String? = null,
@@ -129,6 +140,20 @@ class ProtocolSessionManager(
     ?.takeIf { it.broadcastSocketId != null && it.broadcastInitialized }
     ?.broadcastSocketId
 
+  fun connectionDebugSnapshot(socketId: String): ConnectionDebugSnapshot? {
+    val connection = connections[socketId] ?: return null
+    val session = logicalClient
+    return ConnectionDebugSnapshot(
+      remoteAddress = connection.remoteAddress,
+      clientId = connection.clientId ?: session?.clientId,
+      role = connection.role,
+      handshakeState = connection.handshakeState,
+      protocolVersion = connection.protocolVersion,
+      broadcastInitialized = session?.broadcastInitialized ?: false,
+      requestSocketCount = session?.requestSocketIds?.size ?: 0
+    )
+  }
+
   private fun handleAwaitingPlayer(
     connection: ConnectionState,
     message: IncomingMessage
@@ -161,10 +186,10 @@ class ProtocolSessionManager(
       )
     }
 
-    connection.role = attach.role
-    connection.clientId = attach.clientId
-    connection.protocolVersion = attach.protocolVersion
-    connection.handshakeState = if (attach.role == SocketRole.BROADCAST) {
+    connection.role = attach.clientInfo.role
+    connection.clientId = attach.clientInfo.clientId
+    connection.protocolVersion = attach.clientInfo.protocolVersion
+    connection.handshakeState = if (attach.clientInfo.role == SocketRole.BROADCAST) {
       HandshakeState.AWAITING_INIT
     } else {
       HandshakeState.READY
@@ -172,6 +197,7 @@ class ProtocolSessionManager(
 
     return ProtocolEngineResult(
       replies = listOf(OutgoingMessage(ProtocolConstants.Protocol, serverProtocolVersion)),
+      socketsToClose = attach.replacedSocketIds,
       sessionChanged = true,
       sessionSnapshot = logicalClient?.toSnapshot()
     )
@@ -207,7 +233,7 @@ class ProtocolSessionManager(
   private fun attachToLogicalClient(
     connection: ConnectionState,
     handshake: ParsedHandshake
-  ): ProtocolClientInfo? {
+  ): AttachResult? {
     val role = if (handshake.noBroadcast) SocketRole.REQUEST else SocketRole.BROADCAST
     val currentSession = logicalClient
     val requestedClientId = handshake.clientId?.takeIf { it.isNotBlank() }
@@ -221,11 +247,13 @@ class ProtocolSessionManager(
         requestSocketIds = if (role == SocketRole.REQUEST) setOf(connection.socketId) else emptySet(),
         broadcastInitialized = false
       )
-      return ProtocolClientInfo(
-        remoteAddress = connection.remoteAddress,
-        clientId = requestedClientId,
-        protocolVersion = handshake.protocolVersion,
-        role = role
+      return AttachResult(
+        clientInfo = ProtocolClientInfo(
+          remoteAddress = connection.remoteAddress,
+          clientId = requestedClientId,
+          protocolVersion = handshake.protocolVersion,
+          role = role
+        )
       )
     }
 
@@ -233,11 +261,15 @@ class ProtocolSessionManager(
       return null
     }
 
-    if (role == SocketRole.BROADCAST && currentSession.broadcastSocketId != null) {
-      return null
-    }
-
     val effectiveClientId = currentSession.clientId ?: requestedClientId
+    val replacedSocketIds = mutableSetOf<String>()
+    if (
+      role == SocketRole.BROADCAST &&
+      currentSession.broadcastSocketId != null &&
+      currentSession.broadcastSocketId != connection.socketId
+    ) {
+      replacedSocketIds += currentSession.broadcastSocketId
+    }
     logicalClient = currentSession.copy(
       clientId = effectiveClientId,
       protocolVersion = handshake.protocolVersion,
@@ -246,14 +278,18 @@ class ProtocolSessionManager(
         currentSession.requestSocketIds + connection.socketId
       } else {
         currentSession.requestSocketIds
-      }
+      },
+      broadcastInitialized = if (role == SocketRole.BROADCAST) false else currentSession.broadcastInitialized
     )
 
-    return ProtocolClientInfo(
-      remoteAddress = connection.remoteAddress,
-      clientId = effectiveClientId,
-      protocolVersion = handshake.protocolVersion,
-      role = role
+    return AttachResult(
+      clientInfo = ProtocolClientInfo(
+        remoteAddress = connection.remoteAddress,
+        clientId = effectiveClientId,
+        protocolVersion = handshake.protocolVersion,
+        role = role
+      ),
+      replacedSocketIds = replacedSocketIds
     )
   }
 
@@ -307,6 +343,11 @@ class ProtocolSessionManager(
     val protocolVersion: Int,
     val noBroadcast: Boolean,
     val clientId: String?
+  )
+
+  private data class AttachResult(
+    val clientInfo: ProtocolClientInfo,
+    val replacedSocketIds: Set<String> = emptySet()
   )
 
   private data class ConnectionState(

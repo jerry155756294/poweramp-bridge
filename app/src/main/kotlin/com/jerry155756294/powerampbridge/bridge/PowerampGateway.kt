@@ -10,6 +10,8 @@ import android.util.Base64
 import androidx.core.content.ContextCompat
 import com.maxmpz.poweramp.player.PowerampAPI
 import com.maxmpz.poweramp.player.PowerampAPIHelper
+import kotlin.math.ceil
+import timber.log.Timber
 
 class PowerampGateway(
   private val context: Context,
@@ -23,14 +25,24 @@ class PowerampGateway(
 
   private val receiver = object : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-      when (intent.action) {
-        PowerampAPI.ACTION_TRACK_CHANGED -> handleTrack(intent)
-        PowerampAPI.ACTION_TRACK_CHANGED_EXPLICIT -> handleTrack(intent)
-        PowerampAPI.ACTION_STATUS_CHANGED -> handleStatus(intent)
-        PowerampAPI.ACTION_STATUS_CHANGED_EXPLICIT -> handleStatus(intent)
-        PowerampAPI.ACTION_PLAYING_MODE_CHANGED -> handlePlayingMode(intent)
-        PowerampAPI.ACTION_TRACK_POS_SYNC -> handlePosition(intent)
-        PowerampAPI.ACTION_AA_CHANGED -> invalidateCoverCache()
+      runCatching {
+        when (intent.action) {
+          PowerampAPI.ACTION_TRACK_CHANGED -> handleTrack(intent)
+          PowerampAPI.ACTION_TRACK_CHANGED_EXPLICIT -> handleTrack(intent)
+          PowerampAPI.ACTION_STATUS_CHANGED -> handleStatus(intent)
+          PowerampAPI.ACTION_STATUS_CHANGED_EXPLICIT -> handleStatus(intent)
+          PowerampAPI.ACTION_PLAYING_MODE_CHANGED -> handlePlayingMode(intent)
+          PowerampAPI.ACTION_TRACK_POS_SYNC -> handlePosition(intent)
+          PowerampAPI.ACTION_AA_CHANGED -> invalidateCoverCache()
+        }
+      }.onFailure { error ->
+        Timber.e(error, "Failed handling Poweramp broadcast: %s", intent.action)
+        stateRepository.setError(
+          "Poweramp broadcast failed: ${error.message ?: error.javaClass.simpleName}"
+        )
+        stateRepository.recordPowerampEvent(
+          "Broadcast failure on ${intent.action}: ${error.javaClass.simpleName}"
+        )
       }
     }
   }
@@ -100,10 +112,19 @@ class PowerampGateway(
   fun next(): Boolean = sendCommand(PowerampAPI.Commands.NEXT)
   fun previous(): Boolean = sendCommand(PowerampAPI.Commands.PREVIOUS)
 
-  fun seekTo(positionSeconds: Int): Boolean =
-    sendCommand(PowerampAPI.Commands.SEEK) {
+  fun seekTo(positionMs: Long): Boolean {
+    val clampedMs = positionMs.coerceAtLeast(0L)
+    val boundedMs = stateRepository.state.value.playback.track.durationMs
+      .takeIf { it > 0L }
+      ?.let { clampedMs.coerceAtMost(it) }
+      ?: clampedMs
+    val positionSeconds = ceil(boundedMs / 1000.0).toLong()
+      .coerceIn(0L, Int.MAX_VALUE.toLong())
+      .toInt()
+    return sendCommand(PowerampAPI.Commands.SEEK) {
       it.putExtra(PowerampAPI.Track.POSITION, positionSeconds)
     }
+  }
 
   fun setShuffle(mode: String): Boolean {
     val normalized = when (mode.lowercase()) {
@@ -176,6 +197,7 @@ class PowerampGateway(
   private fun handleTrack(intent: Intent) {
     val track = intent.getBundleExtra(PowerampAPI.EXTRA_TRACK) ?: return
     val positionSec = intent.getIntExtra(PowerampAPI.Track.POSITION, -1)
+    val durationMs = extractDurationMs(track)
     val realId = track.getLong(PowerampAPI.Track.REAL_ID, 0L)
     invalidateCoverCacheIfNeeded(realId)
     stateRepository.updatePlayback { playback ->
@@ -186,7 +208,7 @@ class PowerampGateway(
           artist = track.getString(PowerampAPI.Track.ARTIST).orEmpty(),
           album = track.getString(PowerampAPI.Track.ALBUM).orEmpty(),
           path = track.getString(PowerampAPI.Track.PATH).orEmpty(),
-          durationMs = track.getInt(PowerampAPI.Track.DURATION, 0).toLong() * 1000L,
+          durationMs = durationMs,
           year = bundleString(track, "year"),
           albumArtist = bundleString(track, "albumArtist"),
           genre = bundleString(track, "genre"),
@@ -195,7 +217,11 @@ class PowerampGateway(
           sampleRate = bundleString(track, PowerampAPI.Track.SAMPLE_RATE),
           channels = bundleString(track, PowerampAPI.Track.CHANNELS),
           bitrate = bundleString(track, PowerampAPI.Track.BITRATE),
-          positionMs = if (positionSec >= 0) positionSec * 1000L else playback.track.positionMs
+          positionMs = if (positionSec >= 0) {
+            normalizePositionMs(positionSec.toLong() * 1000L, durationMs)
+          } else {
+            playback.track.positionMs
+          }
         )
       )
     }
@@ -215,10 +241,15 @@ class PowerampGateway(
     }
     val positionSec = intent.getIntExtra(PowerampAPI.Track.POSITION, -1)
     stateRepository.updatePlayback { playback ->
+      val durationMs = playback.track.durationMs
       playback.copy(
         state = state,
         track = playback.track.copy(
-          positionMs = if (positionSec >= 0) positionSec * 1000L else playback.track.positionMs
+          positionMs = if (positionSec >= 0) {
+            normalizePositionMs(positionSec.toLong() * 1000L, durationMs)
+          } else {
+            playback.track.positionMs
+          }
         )
       )
     }
@@ -247,7 +278,12 @@ class PowerampGateway(
     val positionSec = intent.getIntExtra(PowerampAPI.Track.POSITION, -1)
     if (positionSec < 0) return
     stateRepository.updatePlayback { playback ->
-      playback.copy(track = playback.track.copy(positionMs = positionSec * 1000L))
+      val durationMs = playback.track.durationMs
+      playback.copy(
+        track = playback.track.copy(
+          positionMs = normalizePositionMs(positionSec.toLong() * 1000L, durationMs)
+        )
+      )
     }
   }
 
@@ -270,6 +306,20 @@ class PowerampGateway(
 
   private fun bundleString(bundle: Bundle, key: String): String =
     if (bundle.containsKey(key)) bundle.get(key)?.toString().orEmpty() else ""
+
+  private fun extractDurationMs(track: Bundle): Long {
+    val durationMs = track.getLong(PowerampAPI.Track.DURATION_MS, Long.MIN_VALUE)
+    if (durationMs >= 0L) {
+      return durationMs
+    }
+    val durationSeconds = track.getInt(PowerampAPI.Track.DURATION, 0).toLong()
+    return (durationSeconds * 1000L).coerceAtLeast(0L)
+  }
+
+  private fun normalizePositionMs(positionMs: Long, durationMs: Long): Long {
+    val sanitized = positionMs.coerceAtLeast(0L)
+    return if (durationMs > 0L) sanitized.coerceAtMost(durationMs) else sanitized
+  }
 
   private fun invalidateCoverCacheIfNeeded(realId: Long) {
     if (cachedCover?.realId != realId) {

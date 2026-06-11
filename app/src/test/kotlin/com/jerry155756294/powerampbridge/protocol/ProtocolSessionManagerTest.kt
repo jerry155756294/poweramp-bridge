@@ -158,6 +158,36 @@ class ProtocolSessionManagerTest {
   }
 
   @Test
+  fun `same client can replace stale broadcast socket immediately`() {
+    manager.registerConnection("broadcast-old", "10.0.0.2")
+    manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast-old",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Init, null))
+
+    manager.registerConnection("broadcast-new", "10.0.0.2")
+    manager.processMessage("broadcast-new", IncomingMessage(ProtocolConstants.Player, "Android"))
+    val replacement = manager.processMessage(
+      "broadcast-new",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+
+    assertFalse(replacement.disconnect)
+    assertEquals(setOf("broadcast-old"), replacement.socketsToClose)
+    assertTrue(replacement.sessionChanged)
+    assertTrue(replacement.sessionSnapshot?.broadcastSocketConnected == true)
+    assertFalse(replacement.sessionSnapshot?.broadcastInitialized == true)
+  }
+
+  @Test
   fun `legacy protocol payload is accepted`() {
     manager.registerConnection("legacy", "10.0.0.5")
     manager.processMessage("legacy", IncomingMessage(ProtocolConstants.Player, "Android"))

@@ -52,9 +52,9 @@ class MbrcProtocolAdapter(
       }
 
       ProtocolConstants.NowPlayingPosition -> {
-        val seconds = asInt(message.data)
-        if (seconds != null) {
-          commandResult(powerampGateway.seekTo(seconds), ProtocolConstants.NowPlayingPosition)
+        val positionMs = asLong(message.data)
+        if (positionMs != null) {
+          commandResult(powerampGateway.seekTo(positionMs), ProtocolConstants.NowPlayingPosition)
         } else {
           listOf(
             codec.encode(
@@ -276,6 +276,20 @@ class MbrcProtocolAdapter(
       when (current) {
         is Number -> current.toInt()
         is String -> current.toIntOrNull()
+        else -> null
+      }
+    }
+    else -> null
+  }
+
+  private fun asLong(data: Any?): Long? = when (data) {
+    is Number -> data.toLong()
+    is String -> data.toLongOrNull()
+    is Map<*, *> -> {
+      val current = data["current"] ?: data["value"] ?: data["position"]
+      when (current) {
+        is Number -> current.toLong()
+        is String -> current.toLongOrNull()
         else -> null
       }
     }

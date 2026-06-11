@@ -33,17 +33,15 @@ class BridgeStateRepository {
     }
   }
 
-  fun recordRejectedConnection(remoteAddress: String, reason: String) {
-    val timestamp = LogEntry.timestampNow()
+  fun recordRejectedConnection(event: ConnectionEventSnapshot, reason: String) {
     _state.update {
-      it.copy(lastRejectedReason = "$timestamp ($remoteAddress): $reason")
+      it.copy(lastRejectedReason = event.format(reason))
     }
   }
 
-  fun recordDisconnect(remoteAddress: String, reason: String) {
-    val timestamp = LogEntry.timestampNow()
+  fun recordDisconnect(event: ConnectionEventSnapshot, reason: String) {
     _state.update {
-      it.copy(lastDisconnectReason = "$timestamp ($remoteAddress): $reason")
+      it.copy(lastDisconnectReason = event.format(reason))
     }
   }
 

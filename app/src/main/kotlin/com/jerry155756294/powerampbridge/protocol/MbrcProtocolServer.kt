@@ -29,8 +29,8 @@ class MbrcProtocolServer(
     suspend fun onBroadcastReady(clientInfo: ProtocolClientInfo): List<String>
     suspend fun onSessionChanged(snapshot: LogicalClientSnapshot?)
     suspend fun onProbe(remoteAddress: String)
-    suspend fun onConnectionRejected(remoteAddress: String, reason: String)
-    suspend fun onConnectionClosed(remoteAddress: String, reason: String)
+    suspend fun onConnectionRejected(snapshot: ConnectionDebugSnapshot, reason: String)
+    suspend fun onConnectionClosed(snapshot: ConnectionDebugSnapshot, reason: String)
   }
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -108,9 +108,14 @@ class MbrcProtocolServer(
           listener.onSessionChanged(result.sessionSnapshot)
         }
         result.probeAddress?.let { listener.onProbe(it) }
-        result.rejectionReason?.let { listener.onConnectionRejected(remoteAddress, it) }
+        result.rejectionReason?.let { reason ->
+          protocolManager.connectionDebugSnapshot(socketId)?.let { snapshot ->
+            listener.onConnectionRejected(snapshot, reason)
+          }
+        }
 
         sendProtocolReplies(session, result.replies)
+        closeSupersededSockets(result.socketsToClose)
 
         if (result.sendInitialSnapshot && result.clientInfo != null) {
           sendEncodedReplies(session, listener.onBroadcastReady(result.clientInfo))
@@ -127,12 +132,26 @@ class MbrcProtocolServer(
       closeReason = error.message ?: error.javaClass.simpleName
       Timber.w(error, "Client loop ended for %s", remoteAddress)
     } finally {
+      val connectionSnapshot = mutex.withLock {
+        protocolManager.connectionDebugSnapshot(socketId)
+      }
       val disconnectResult = mutex.withLock {
         sessions.remove(socketId)
         protocolManager.disconnect(socketId)
       }
       session.close()
-      listener.onConnectionClosed(remoteAddress, closeReason)
+      listener.onConnectionClosed(
+        connectionSnapshot ?: ConnectionDebugSnapshot(
+          remoteAddress = remoteAddress,
+          clientId = null,
+          role = null,
+          handshakeState = HandshakeState.AWAITING_PLAYER,
+          protocolVersion = ProtocolConstants.ProtocolVersion,
+          broadcastInitialized = false,
+          requestSocketCount = 0
+        ),
+        closeReason
+      )
       if (disconnectResult.sessionChanged) {
         listener.onSessionChanged(disconnectResult.sessionSnapshot)
       }
@@ -153,6 +172,14 @@ class MbrcProtocolServer(
     replies: List<String>
   ) {
     replies.forEach { session.send(it) }
+  }
+
+  private suspend fun closeSupersededSockets(socketIds: Set<String>) {
+    if (socketIds.isEmpty()) return
+    val staleSessions = mutex.withLock {
+      socketIds.mapNotNull { sessions[it] }
+    }
+    staleSessions.forEach { it.close() }
   }
 
   private class ClientSession(

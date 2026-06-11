@@ -18,6 +18,7 @@ import com.jerry155756294.powerampbridge.data.BridgeSettings
 import com.jerry155756294.powerampbridge.protocol.IncomingMessage
 import com.jerry155756294.powerampbridge.protocol.JsonMessageCodec
 import com.jerry155756294.powerampbridge.protocol.LogicalClientSnapshot
+import com.jerry155756294.powerampbridge.protocol.ConnectionDebugSnapshot
 import com.jerry155756294.powerampbridge.protocol.MbrcProtocolAdapter
 import com.jerry155756294.powerampbridge.protocol.MbrcProtocolServer
 import com.jerry155756294.powerampbridge.protocol.ProtocolClientInfo
@@ -91,12 +92,12 @@ class BridgeService : Service() {
         app.appContainer.stateRepository.recordProbe(remoteAddress)
       }
 
-      override suspend fun onConnectionRejected(remoteAddress: String, reason: String) {
-        app.appContainer.stateRepository.recordRejectedConnection(remoteAddress, reason)
+      override suspend fun onConnectionRejected(snapshot: ConnectionDebugSnapshot, reason: String) {
+        app.appContainer.stateRepository.recordRejectedConnection(snapshot.toEventSnapshot(), reason)
       }
 
-      override suspend fun onConnectionClosed(remoteAddress: String, reason: String) {
-        app.appContainer.stateRepository.recordDisconnect(remoteAddress, reason)
+      override suspend fun onConnectionClosed(snapshot: ConnectionDebugSnapshot, reason: String) {
+        app.appContainer.stateRepository.recordDisconnect(snapshot.toEventSnapshot(), reason)
       }
     })
 
@@ -336,3 +337,11 @@ class BridgeService : Service() {
     }
   }
 }
+
+private fun ConnectionDebugSnapshot.toEventSnapshot(): ConnectionEventSnapshot = ConnectionEventSnapshot(
+  remoteAddress = remoteAddress,
+  clientId = clientId,
+  role = role,
+  broadcastInitialized = broadcastInitialized,
+  requestSocketCount = requestSocketCount
+)
