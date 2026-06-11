@@ -1,5 +1,6 @@
 package com.jerry155756294.powerampbridge.bridge
 
+import com.jerry155756294.powerampbridge.protocol.LogicalClientSnapshot
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,12 +18,22 @@ class BridgeStateRepository {
     _state.update { it.copy(listenerActive = active, listenPort = port) }
   }
 
-  fun setHandshakeComplete(complete: Boolean) {
-    _state.update { it.copy(handshakeComplete = complete) }
+  fun updateSession(snapshot: LogicalClientSnapshot?) {
+    _state.update { it.withSession(snapshot) }
   }
 
-  fun setActiveClient(client: String?) {
-    _state.update { it.copy(activeClient = client) }
+  fun recordProbe(remoteAddress: String) {
+    val timestamp = LogEntry.timestampNow()
+    _state.update {
+      it.copy(lastProbeAt = "$timestamp ($remoteAddress)")
+    }
+  }
+
+  fun recordRejectedConnection(remoteAddress: String, reason: String) {
+    val timestamp = LogEntry.timestampNow()
+    _state.update {
+      it.copy(lastRejectedReason = "$timestamp ($remoteAddress): $reason")
+    }
   }
 
   fun setPowerampAvailable(available: Boolean) {

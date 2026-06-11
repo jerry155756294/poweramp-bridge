@@ -5,9 +5,10 @@ import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.io.PrintWriter
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.util.concurrent.atomic.AtomicReference
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,19 +25,26 @@ class MbrcProtocolServer(
   private val listener: Listener
 ) {
   interface Listener {
-    suspend fun onClientConnected(remoteAddress: String): Boolean
-    suspend fun onClientDisconnected(remoteAddress: String)
-    suspend fun onMessage(remoteAddress: String, message: IncomingMessage): List<String>
+    suspend fun onCommand(clientInfo: ProtocolClientInfo, message: IncomingMessage): List<String>
+    suspend fun onBroadcastReady(clientInfo: ProtocolClientInfo): List<String>
+    suspend fun onSessionChanged(snapshot: LogicalClientSnapshot?)
+    suspend fun onProbe(remoteAddress: String)
+    suspend fun onConnectionRejected(remoteAddress: String, reason: String)
   }
 
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+  private val mutex = Mutex()
+  private val protocolManager = ProtocolSessionManager()
+  private val sessions = linkedMapOf<String, ClientSession>()
   private var serverSocket: ServerSocket? = null
   private var acceptJob: Job? = null
-  private val activeSession = AtomicReference<ClientSession?>(null)
 
   suspend fun start(port: Int) {
     stop()
-    serverSocket = ServerSocket(port)
+    serverSocket = ServerSocket().apply {
+      reuseAddress = true
+      bind(InetSocketAddress(port))
+    }
     acceptJob = scope.launch {
       while (isActive) {
         val socket = try {
@@ -45,21 +53,15 @@ class MbrcProtocolServer(
           null
         } ?: break
 
+        val socketId = UUID.randomUUID().toString()
         val remoteAddress = socket.inetAddress?.hostAddress.orEmpty()
-        if (activeSession.get() != null) {
-          rejectClient(socket)
-          continue
-        }
-
-        if (!listener.onClientConnected(remoteAddress)) {
-          rejectClient(socket)
-          continue
-        }
-
         val session = ClientSession(socket)
-        activeSession.set(session)
+        mutex.withLock {
+          sessions[socketId] = session
+          protocolManager.registerConnection(socketId, remoteAddress)
+        }
         scope.launch {
-          handleClient(session, remoteAddress)
+          handleClient(socketId, remoteAddress, session)
         }
       }
     }
@@ -68,51 +70,92 @@ class MbrcProtocolServer(
   suspend fun stop() {
     acceptJob?.cancelAndJoin()
     acceptJob = null
-    activeSession.getAndSet(null)?.close()
+    mutex.withLock {
+      sessions.values.forEach { it.close() }
+      sessions.clear()
+    }
     serverSocket?.close()
     serverSocket = null
   }
 
-  suspend fun sendToActive(messages: List<String>) {
-    val session = activeSession.get() ?: return
-    messages.forEach { session.send(it) }
+  suspend fun sendBroadcast(messages: List<String>) {
+    val socketId = mutex.withLock { protocolManager.broadcastSocketId() } ?: return
+    val target = mutex.withLock { sessions[socketId] } ?: return
+
+    messages.forEach { target.send(it) }
   }
 
-  private suspend fun handleClient(session: ClientSession, remoteAddress: String) {
+  private suspend fun handleClient(
+    socketId: String,
+    remoteAddress: String,
+    session: ClientSession
+  ) {
     try {
       while (true) {
         val line = session.reader.readLine() ?: break
         if (line.isBlank()) continue
+
         val message = codec.parse(line)
-        val replies = listener.onMessage(remoteAddress, message)
-        replies.forEach { session.send(it) }
+        val result = mutex.withLock {
+          protocolManager.processMessage(socketId, message)
+        }
+
+        if (result.sessionChanged) {
+          listener.onSessionChanged(result.sessionSnapshot)
+        }
+        result.probeAddress?.let { listener.onProbe(it) }
+        result.rejectionReason?.let { listener.onConnectionRejected(remoteAddress, it) }
+
+        sendReplies(session, result.replies)
+
+        if (result.sendInitialSnapshot && result.clientInfo != null) {
+          sendReplies(session, listener.onBroadcastReady(result.clientInfo))
+        }
+
+        if (result.delegateMessage != null && result.clientInfo != null) {
+          val replies = listener.onCommand(result.clientInfo, result.delegateMessage)
+          sendReplies(session, replies)
+        }
+
+        if (result.disconnect) break
       }
     } catch (error: Exception) {
       Timber.w(error, "Client loop ended for %s", remoteAddress)
     } finally {
-      activeSession.compareAndSet(session, null)
+      val disconnectResult = mutex.withLock {
+        sessions.remove(socketId)
+        protocolManager.disconnect(socketId)
+      }
       session.close()
-      listener.onClientDisconnected(remoteAddress)
+      if (disconnectResult.sessionChanged) {
+        listener.onSessionChanged(disconnectResult.sessionSnapshot)
+      }
     }
   }
 
-  private suspend fun rejectClient(socket: Socket) {
-    runCatching {
-      val writer = PrintWriter(BufferedWriter(OutputStreamWriter(socket.getOutputStream())), true)
-      writer.write(codec.encode(ProtocolConstants.NotAllowed, "single_client_only") + "\r\n")
-      writer.flush()
-      writer.close()
+  private suspend fun sendReplies(
+    session: ClientSession,
+    replies: List<OutgoingMessage>
+  ) {
+    replies.forEach { reply ->
+      session.send(codec.encode(reply.context, reply.data))
     }
-    runCatching { socket.close() }
+  }
+
+  private suspend fun sendReplies(
+    session: ClientSession,
+    replies: List<String>
+  ) {
+    replies.forEach { session.send(it) }
   }
 
   private class ClientSession(
     socket: Socket
   ) {
-    private val mutex = Mutex()
     private val rawSocket = socket
     val reader: BufferedReader = BufferedReader(InputStreamReader(socket.getInputStream()))
     private val writer = PrintWriter(BufferedWriter(OutputStreamWriter(socket.getOutputStream())), true)
+    private val mutex = Mutex()
 
     suspend fun send(payload: String) {
       mutex.withLock {

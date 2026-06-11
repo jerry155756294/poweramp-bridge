@@ -130,7 +130,6 @@ private fun SettingsTab(
 ) {
   val scope = rememberCoroutineScope()
   var portText by remember(settings.port) { mutableStateOf(settings.port.toString()) }
-  var tokenText by remember(settings.sharedToken) { mutableStateOf(settings.sharedToken) }
 
   Column(
     modifier = Modifier
@@ -139,7 +138,7 @@ private fun SettingsTab(
       .padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp)
   ) {
-    SectionCard("連線") {
+    SectionCard(stringResourceSafe(R.string.settings_network_title)) {
       OutlinedTextField(
         value = portText,
         onValueChange = {
@@ -152,29 +151,20 @@ private fun SettingsTab(
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = Modifier.fillMaxWidth()
       )
-      OutlinedTextField(
-        value = tokenText,
-        onValueChange = {
-          tokenText = it
-          scope.launch { repository.updateSharedToken(it) }
-        },
-        label = { Text("Shared Token") },
-        supportingText = { Text(stringResourceSafe(R.string.token_optional)) },
-        modifier = Modifier.fillMaxWidth()
+      Text(
+        text = stringResourceSafe(R.string.settings_no_token_notice),
+        style = MaterialTheme.typography.bodySmall
       )
     }
 
-    SectionCard("啟動選項") {
-      SettingSwitch("非本機要求 token", settings.requireTokenForRemote) {
-        scope.launch { repository.updateRequireTokenForRemote(it) }
-      }
-      SettingSwitch("開啟 app 時自動啟動", settings.autoStart) {
+    SectionCard(stringResourceSafe(R.string.settings_service_title)) {
+      SettingSwitch(stringResourceSafe(R.string.settings_auto_start), settings.autoStart) {
         scope.launch { repository.updateAutoStart(it) }
       }
-      SettingSwitch("開機啟動 bridge", settings.startOnBoot) {
+      SettingSwitch(stringResourceSafe(R.string.settings_start_on_boot), settings.startOnBoot) {
         scope.launch { repository.updateStartOnBoot(it) }
       }
-      SettingSwitch("通知常駐", settings.foregroundPersistent) {
+      SettingSwitch(stringResourceSafe(R.string.settings_foreground_persistent), settings.foregroundPersistent) {
         scope.launch { repository.updateForegroundPersistent(it) }
       }
     }
@@ -196,10 +186,15 @@ private fun StatusTab(uiState: BridgeUiState) {
     verticalArrangement = Arrangement.spacedBy(12.dp)
   ) {
     SectionCard("Bridge") {
-      StatusLine("服務", if (uiState.serviceRunning) "運作中" else "未運作")
+      StatusLine("服務", if (uiState.serviceRunning) "執行中" else "已停止")
       StatusLine("Listener", if (uiState.listenerActive) "TCP ${uiState.listenPort}" else "未監聽")
-      StatusLine("Client", uiState.activeClient ?: stringResourceSafe(R.string.client_none))
-      StatusLine("Handshake", if (uiState.handshakeComplete) "已完成" else "尚未完成")
+      StatusLine("Client IP", uiState.activeClient ?: stringResourceSafe(R.string.client_none))
+      StatusLine("Client ID", uiState.clientId ?: "未提供")
+      StatusLine("協議版本", uiState.protocolVersion?.toString() ?: "未知")
+      StatusLine("主 socket", socketStatus(uiState.broadcastSocketConnected, uiState.broadcastInitialized))
+      StatusLine("請求 socket", if (uiState.requestSocketConnected) "已連線" else "未連線")
+      StatusLine("最近 verifyconnection", uiState.lastProbeAt ?: "尚無紀錄")
+      StatusLine("最近拒絕", uiState.lastRejectedReason ?: "尚無紀錄")
     }
 
     SectionCard("Poweramp") {
@@ -238,9 +233,9 @@ private fun DebugTab(uiState: BridgeUiState) {
     SectionCard("最後錯誤") {
       Text(uiState.lastError ?: "目前沒有錯誤")
     }
-    SectionCard("最近命令") {
+    SectionCard("最近收到的命令") {
       if (uiState.recentCommands.isEmpty()) {
-        Text("尚未收到命令")
+        Text("尚無紀錄")
       } else {
         uiState.recentCommands.forEach { entry ->
           StatusLine(entry.timestamp, entry.message)
@@ -249,7 +244,7 @@ private fun DebugTab(uiState: BridgeUiState) {
     }
     SectionCard("最近 Poweramp 事件") {
       if (uiState.recentPowerampEvents.isEmpty()) {
-        Text("尚未收到事件")
+        Text("尚無紀錄")
       } else {
         uiState.recentPowerampEvents.forEach { entry ->
           StatusLine(entry.timestamp, entry.message)
@@ -303,6 +298,12 @@ private fun StatusLine(label: String, value: String) {
     Text(label, style = MaterialTheme.typography.labelMedium)
     Text(value, style = MaterialTheme.typography.bodyMedium)
   }
+}
+
+private fun socketStatus(connected: Boolean, initialized: Boolean): String = when {
+  initialized -> "已完成 init"
+  connected -> "已握手，等待 init"
+  else -> "未連線"
 }
 
 @Composable

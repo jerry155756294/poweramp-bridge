@@ -17,8 +17,10 @@ import com.jerry155756294.powerampbridge.R
 import com.jerry155756294.powerampbridge.data.BridgeSettings
 import com.jerry155756294.powerampbridge.protocol.IncomingMessage
 import com.jerry155756294.powerampbridge.protocol.JsonMessageCodec
+import com.jerry155756294.powerampbridge.protocol.LogicalClientSnapshot
 import com.jerry155756294.powerampbridge.protocol.MbrcProtocolAdapter
 import com.jerry155756294.powerampbridge.protocol.MbrcProtocolServer
+import com.jerry155756294.powerampbridge.protocol.ProtocolClientInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,6 +40,7 @@ class BridgeService : Service() {
   private var stateJob: Job? = null
   private var activeSettings = BridgeSettings()
   private var startedPort: Int? = null
+  private var lastBroadcastPayload: List<String>? = null
 
   override fun onCreate() {
     super.onCreate()
@@ -49,26 +52,30 @@ class BridgeService : Service() {
       powerampGateway = powerampGateway
     )
     server = MbrcProtocolServer(JsonMessageCodec(), object : MbrcProtocolServer.Listener {
-      override suspend fun onClientConnected(remoteAddress: String): Boolean {
-        val allowed = allowClient(remoteAddress)
-        if (allowed) {
-          app.appContainer.stateRepository.setActiveClient(remoteAddress)
-          adapter.onClientConnected()
-        } else {
-          app.appContainer.stateRepository.setActiveClient(null)
-        }
-        return allowed
-      }
-
-      override suspend fun onClientDisconnected(remoteAddress: String) {
-        app.appContainer.stateRepository.setActiveClient(null)
-        adapter.onClientDisconnected()
-      }
-
-      override suspend fun onMessage(
-        remoteAddress: String,
+      override suspend fun onCommand(
+        clientInfo: ProtocolClientInfo,
         message: IncomingMessage
-      ): List<String> = adapter.handleMessage(message, activeSettings)
+      ): List<String> = adapter.handleCommand(message)
+
+      override suspend fun onBroadcastReady(clientInfo: ProtocolClientInfo): List<String> =
+        adapter.snapshotMessages(app.appContainer.stateRepository.state.value).also {
+          lastBroadcastPayload = it
+        }
+
+      override suspend fun onSessionChanged(snapshot: LogicalClientSnapshot?) {
+        app.appContainer.stateRepository.updateSession(snapshot)
+        if (snapshot?.broadcastInitialized != true) {
+          lastBroadcastPayload = null
+        }
+      }
+
+      override suspend fun onProbe(remoteAddress: String) {
+        app.appContainer.stateRepository.recordProbe(remoteAddress)
+      }
+
+      override suspend fun onConnectionRejected(remoteAddress: String, reason: String) {
+        app.appContainer.stateRepository.recordRejectedConnection(remoteAddress, reason)
+      }
     })
 
     createNotificationChannel()
@@ -97,6 +104,7 @@ class BridgeService : Service() {
     powerampGateway.stop()
     app.appContainer.stateRepository.setServiceRunning(false)
     app.appContainer.stateRepository.setListenerState(false, activeSettings.port)
+    app.appContainer.stateRepository.updateSession(null)
     scope.cancel()
     super.onDestroy()
   }
@@ -132,20 +140,18 @@ class BridgeService : Service() {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, buildNotification(state))
 
-        if (adapter.canBroadcastState()) {
+        if (state.broadcastInitialized) {
+          val payload = adapter.snapshotMessages(state)
+          if (payload == lastBroadcastPayload) {
+            return@collectLatest
+          }
+          lastBroadcastPayload = payload
           launch(Dispatchers.IO) {
-            server.sendToActive(adapter.snapshotMessages(state))
+            server.sendBroadcast(payload)
           }
         }
       }
     }
-  }
-
-  private fun allowClient(remoteAddress: String): Boolean {
-    if (!activeSettings.requireTokenForRemote || activeSettings.sharedToken.isBlank()) {
-      return true
-    }
-    return remoteAddress == "127.0.0.1" || remoteAddress == "::1"
   }
 
   private fun buildNotification(state: BridgeUiState): Notification {
@@ -174,6 +180,22 @@ class BridgeService : Service() {
       getString(R.string.notification_no_track)
     }
 
+    val sessionSummary = buildList {
+      add("Port ${state.listenPort}")
+      state.activeClient?.let { add("Client $it") }
+      state.clientId?.let { add("ID $it") }
+      add(
+        when {
+          state.broadcastInitialized -> "Broadcast ready"
+          state.broadcastSocketConnected -> "Broadcast waiting init"
+          else -> "No broadcast socket"
+        }
+      )
+      if (state.requestSocketConnected) {
+        add("Request socket connected")
+      }
+    }.joinToString(" | ")
+
     return NotificationCompat.Builder(this, CHANNEL_ID)
       .setSmallIcon(android.R.drawable.ic_media_play)
       .setContentTitle(
@@ -181,14 +203,7 @@ class BridgeService : Service() {
         else getString(R.string.bridge_notification_stopped)
       )
       .setContentText(summary)
-      .setSubText(
-        listOfNotNull(
-          "Port ${state.listenPort}",
-          state.activeClient?.let { "Client $it" },
-          if (state.powerampAvailable) getString(R.string.poweramp_present)
-          else getString(R.string.poweramp_missing)
-        ).joinToString(" | ")
-      )
+      .setSubText(sessionSummary)
       .setContentIntent(launchIntent)
       .setOngoing(activeSettings.foregroundPersistent)
       .addAction(0, getString(R.string.notification_stop), stopIntent)

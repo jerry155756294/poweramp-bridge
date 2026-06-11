@@ -1,5 +1,6 @@
 package com.jerry155756294.powerampbridge.bridge
 
+import com.jerry155756294.powerampbridge.protocol.LogicalClientSnapshot
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -37,9 +38,12 @@ data class LogEntry(
 ) {
   companion object {
     fun create(message: String): LogEntry = LogEntry(
-      timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()),
+      timestamp = timestampNow(),
       message = message
     )
+
+    fun timestampNow(): String =
+      SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
   }
 }
 
@@ -49,9 +53,25 @@ data class BridgeUiState(
   val listenPort: Int = 3000,
   val powerampAvailable: Boolean = false,
   val activeClient: String? = null,
-  val handshakeComplete: Boolean = false,
+  val clientId: String? = null,
+  val protocolVersion: Int? = null,
+  val broadcastSocketConnected: Boolean = false,
+  val broadcastInitialized: Boolean = false,
+  val requestSocketConnected: Boolean = false,
+  val lastProbeAt: String? = null,
+  val lastRejectedReason: String? = null,
   val playback: PlaybackSnapshot = PlaybackSnapshot(),
   val recentCommands: List<LogEntry> = emptyList(),
   val recentPowerampEvents: List<LogEntry> = emptyList(),
   val lastError: String? = null
 )
+
+internal fun BridgeUiState.withSession(snapshot: LogicalClientSnapshot?): BridgeUiState =
+  copy(
+    activeClient = snapshot?.remoteAddress,
+    clientId = snapshot?.clientId,
+    protocolVersion = snapshot?.protocolVersion,
+    broadcastSocketConnected = snapshot?.broadcastSocketConnected ?: false,
+    broadcastInitialized = snapshot?.broadcastInitialized ?: false,
+    requestSocketConnected = snapshot?.requestSocketConnected ?: false
+  )

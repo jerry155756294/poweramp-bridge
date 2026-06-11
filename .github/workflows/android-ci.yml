@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - "codex/**"
       - "feature/**"
   pull_request:
 
@@ -30,8 +31,8 @@ jobs:
       - name: Grant execute permission
         run: chmod +x gradlew
 
-      - name: Assemble debug
-        run: ./gradlew assembleDebug
+      - name: Run unit tests and assemble debug
+        run: ./gradlew testDebugUnitTest assembleDebug
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

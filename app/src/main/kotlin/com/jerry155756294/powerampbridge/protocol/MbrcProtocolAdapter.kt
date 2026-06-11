@@ -4,7 +4,6 @@ import com.jerry155756294.powerampbridge.BuildConfig
 import com.jerry155756294.powerampbridge.bridge.BridgeStateRepository
 import com.jerry155756294.powerampbridge.bridge.BridgeUiState
 import com.jerry155756294.powerampbridge.bridge.PowerampGateway
-import com.jerry155756294.powerampbridge.data.BridgeSettings
 import org.json.JSONObject
 
 class MbrcProtocolAdapter(
@@ -12,41 +11,11 @@ class MbrcProtocolAdapter(
   private val stateRepository: BridgeStateRepository,
   private val powerampGateway: PowerampGateway
 ) {
-  private var initialized = false
-
-  fun onClientConnected() {
-    initialized = false
-    stateRepository.setHandshakeComplete(false)
-  }
-
-  fun onClientDisconnected() {
-    initialized = false
-    stateRepository.setHandshakeComplete(false)
-  }
-
-  fun canBroadcastState(): Boolean = initialized
-
-  fun handleMessage(message: IncomingMessage, settings: BridgeSettings): List<String> {
+  fun handleCommand(message: IncomingMessage): List<String> {
     stateRepository.recordCommand("${message.context}: ${message.data ?: ""}".trim())
     return when (message.context) {
-      ProtocolConstants.Player ->
-        listOf(codec.encode(ProtocolConstants.Player, "Android"))
-
-      ProtocolConstants.Protocol -> {
-        stateRepository.setHandshakeComplete(true)
-        listOf(codec.encode(ProtocolConstants.Protocol, ProtocolConstants.ProtocolVersion.toString()))
-      }
-
-      ProtocolConstants.Init -> {
-        initialized = true
-        snapshotMessages(stateRepository.state.value)
-      }
-
-      ProtocolConstants.VerifyConnection ->
-        listOf(codec.encode(ProtocolConstants.VerifyConnection, ""))
-
-      ProtocolConstants.Ping ->
-        listOf(codec.encode(ProtocolConstants.Pong, message.data ?: ""))
+      ProtocolConstants.PluginVersion ->
+        listOf(codec.encode(ProtocolConstants.PluginVersion, pluginVersion()))
 
       ProtocolConstants.PlayerPlayPause ->
         commandResult(powerampGateway.playPause(), ProtocolConstants.PlayerPlayPause)
@@ -72,7 +41,7 @@ class MbrcProtocolAdapter(
           powerampGateway.setVolume(volume)
           listOf(codec.encode(ProtocolConstants.PlayerVolume, volume))
         } else {
-          commandUnavailable(ProtocolConstants.PlayerVolume)
+          listOf(codec.encode(ProtocolConstants.PlayerVolume, stateRepository.state.value.playback.volume))
         }
       }
 
@@ -121,9 +90,6 @@ class MbrcProtocolAdapter(
 
       ProtocolConstants.NowPlayingDetails ->
         listOf(codec.encode(ProtocolConstants.NowPlayingDetails, detailsPayload(stateRepository.state.value)))
-
-      ProtocolConstants.PluginVersion ->
-        listOf(codec.encode(ProtocolConstants.PluginVersion, pluginVersion()))
 
       ProtocolConstants.NowPlayingList ->
         listOf(codec.encode(ProtocolConstants.NowPlayingList, nowPlayingListPayload(stateRepository.state.value)))
