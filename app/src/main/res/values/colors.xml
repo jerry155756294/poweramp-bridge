@@ -1,0 +1,7 @@
+<resources>
+  <color name="seed">#2154E6</color>
+  <color name="surfaceTint">#2154E6</color>
+  <color name="bridgeAccent">#FF7A00</color>
+  <color name="bridgeSurface">#F5F7FB</color>
+  <color name="bridgePanel">#FFFFFF</color>
+</resources>
