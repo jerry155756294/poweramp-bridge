@@ -25,15 +25,20 @@ class PowerampGateway(
 
   private val receiver = object : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+      val actionLabel = PowerampBroadcastDiagnostics.actionLabel(intent.action)
+      val extrasSummary = PowerampBroadcastDiagnostics.describeExtras(intent.extras)
+      stateRepository.recordPowerampEvent(
+        "Poweramp action: $actionLabel extras=$extrasSummary"
+      )
       runCatching {
         when (intent.action) {
-          PowerampAPI.ACTION_TRACK_CHANGED -> handleTrack(intent)
-          PowerampAPI.ACTION_TRACK_CHANGED_EXPLICIT -> handleTrack(intent)
-          PowerampAPI.ACTION_STATUS_CHANGED -> handleStatus(intent)
-          PowerampAPI.ACTION_STATUS_CHANGED_EXPLICIT -> handleStatus(intent)
-          PowerampAPI.ACTION_PLAYING_MODE_CHANGED -> handlePlayingMode(intent)
-          PowerampAPI.ACTION_TRACK_POS_SYNC -> handlePosition(intent)
-          PowerampAPI.ACTION_AA_CHANGED -> invalidateCoverCache()
+          PowerampAPI.ACTION_TRACK_CHANGED -> handleTrack(intent, actionLabel)
+          PowerampAPI.ACTION_TRACK_CHANGED_EXPLICIT -> handleTrack(intent, actionLabel)
+          PowerampAPI.ACTION_STATUS_CHANGED -> handleStatus(intent, actionLabel)
+          PowerampAPI.ACTION_STATUS_CHANGED_EXPLICIT -> handleStatus(intent, actionLabel)
+          PowerampAPI.ACTION_PLAYING_MODE_CHANGED -> handlePlayingMode(intent, actionLabel)
+          PowerampAPI.ACTION_TRACK_POS_SYNC -> handlePosition(intent, actionLabel)
+          PowerampAPI.ACTION_AA_CHANGED -> handleAaChanged(actionLabel)
         }
       }.onFailure { error ->
         Timber.e(error, "Failed handling Poweramp broadcast: %s", intent.action)
@@ -41,7 +46,7 @@ class PowerampGateway(
           "Poweramp broadcast failed: ${error.message ?: error.javaClass.simpleName}"
         )
         stateRepository.recordPowerampEvent(
-          "Broadcast failure on ${intent.action}: ${error.javaClass.simpleName}"
+          "Broadcast failure on $actionLabel extras=$extrasSummary ${error.javaClass.simpleName}: ${error.message ?: "no-message"}"
         )
       }
     }
@@ -194,11 +199,11 @@ class PowerampGateway(
     stateRepository.updatePlayback { it.copy(volume = percent) }
   }
 
-  private fun handleTrack(intent: Intent) {
+  private fun handleTrack(intent: Intent, actionLabel: String) {
     val track = intent.getBundleExtra(PowerampAPI.EXTRA_TRACK) ?: return
-    val positionSec = intent.getIntExtra(PowerampAPI.Track.POSITION, -1)
-    val durationMs = extractDurationMs(track)
-    val realId = track.getLong(PowerampAPI.Track.REAL_ID, 0L)
+    val positionSec = PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.Track.POSITION) ?: -1
+    val durationMs = PowerampBroadcastDiagnostics.extractDurationMs(track)
+    val realId = PowerampBroadcastDiagnostics.readLong(track, PowerampAPI.Track.REAL_ID) ?: 0L
     invalidateCoverCacheIfNeeded(realId)
     stateRepository.updatePlayback { playback ->
       playback.copy(
@@ -227,19 +232,21 @@ class PowerampGateway(
     }
     requestPositionSync()
     stateRepository.recordPowerampEvent(
-      "Track changed: ${track.getString(PowerampAPI.Track.TITLE).orEmpty()}"
+      "Track changed ($actionLabel): ${track.getString(PowerampAPI.Track.TITLE).orEmpty()}"
     )
   }
 
-  private fun handleStatus(intent: Intent) {
+  private fun handleStatus(intent: Intent, actionLabel: String) {
     val paused = intent.getBooleanExtra(PowerampAPI.EXTRA_PAUSED, false)
-    val state = when (intent.getIntExtra(PowerampAPI.EXTRA_STATE, PowerampAPI.STATE_NO_STATE)) {
+    val stateCode = PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.EXTRA_STATE)
+      ?: PowerampAPI.STATE_NO_STATE
+    val state = when (stateCode) {
       PowerampAPI.STATE_PLAYING -> "playing"
       PowerampAPI.STATE_PAUSED -> "paused"
       PowerampAPI.STATE_STOPPED -> "stopped"
       else -> if (paused) "paused" else stateRepository.state.value.playback.state
     }
-    val positionSec = intent.getIntExtra(PowerampAPI.Track.POSITION, -1)
+    val positionSec = PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.Track.POSITION) ?: -1
     stateRepository.updatePlayback { playback ->
       val durationMs = playback.track.durationMs
       playback.copy(
@@ -257,25 +264,27 @@ class PowerampGateway(
       requestPositionSync()
     }
     updateVolumeSnapshot()
-    stateRepository.recordPowerampEvent("Status changed: $state")
+    stateRepository.recordPowerampEvent("Status changed ($actionLabel): $state")
   }
 
-  private fun handlePlayingMode(intent: Intent) {
-    val repeat = when (intent.getIntExtra(PowerampAPI.EXTRA_REPEAT, -1)) {
+  private fun handlePlayingMode(intent: Intent, actionLabel: String) {
+    val repeat = when (PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.EXTRA_REPEAT) ?: -1) {
       PowerampAPI.RepeatMode.REPEAT_ON -> "all"
       PowerampAPI.RepeatMode.REPEAT_SONG -> "one"
       else -> "none"
     }
-    val shuffle = when (intent.getIntExtra(PowerampAPI.EXTRA_SHUFFLE, -1)) {
+    val shuffle = when (PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.EXTRA_SHUFFLE) ?: -1) {
       PowerampAPI.ShuffleMode.SHUFFLE_ALL -> "shuffle"
       else -> "off"
     }
     stateRepository.updatePlayback { it.copy(repeat = repeat, shuffle = shuffle) }
-    stateRepository.recordPowerampEvent("Playing mode changed: repeat=$repeat shuffle=$shuffle")
+    stateRepository.recordPowerampEvent(
+      "Playing mode changed ($actionLabel): repeat=$repeat shuffle=$shuffle"
+    )
   }
 
-  private fun handlePosition(intent: Intent) {
-    val positionSec = intent.getIntExtra(PowerampAPI.Track.POSITION, -1)
+  private fun handlePosition(intent: Intent, actionLabel: String) {
+    val positionSec = PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.Track.POSITION) ?: -1
     if (positionSec < 0) return
     stateRepository.updatePlayback { playback ->
       val durationMs = playback.track.durationMs
@@ -285,6 +294,12 @@ class PowerampGateway(
         )
       )
     }
+    stateRepository.recordPowerampEvent("Position sync ($actionLabel): ${positionSec}s")
+  }
+
+  private fun handleAaChanged(actionLabel: String) {
+    invalidateCoverCache()
+    stateRepository.recordPowerampEvent("AA changed ($actionLabel): cover cache invalidated")
   }
 
   private fun sendCommand(command: Int, configure: (Intent) -> Unit = {}): Boolean {
@@ -306,15 +321,6 @@ class PowerampGateway(
 
   private fun bundleString(bundle: Bundle, key: String): String =
     if (bundle.containsKey(key)) bundle.get(key)?.toString().orEmpty() else ""
-
-  private fun extractDurationMs(track: Bundle): Long {
-    val durationMs = track.getLong(PowerampAPI.Track.DURATION_MS, Long.MIN_VALUE)
-    if (durationMs >= 0L) {
-      return durationMs
-    }
-    val durationSeconds = track.getInt(PowerampAPI.Track.DURATION, 0).toLong()
-    return (durationSeconds * 1000L).coerceAtLeast(0L)
-  }
 
   private fun normalizePositionMs(positionMs: Long, durationMs: Long): Long {
     val sanitized = positionMs.coerceAtLeast(0L)
@@ -362,5 +368,88 @@ class PowerampGateway(
     const val READY_COVER_STATUS = 1
     const val SUCCESS_COVER_STATUS = 200
     const val NOT_FOUND_COVER_STATUS = 404
+  }
+}
+
+internal object PowerampBroadcastDiagnostics {
+  fun extractDurationMs(track: Bundle): Long {
+    val durationMs = readLong(track, PowerampAPI.Track.DURATION_MS)
+    if (durationMs != null && durationMs >= 0L) {
+      return durationMs
+    }
+
+    val durationSeconds = readLong(track, PowerampAPI.Track.DURATION)
+    return durationSeconds
+      ?.takeIf { it >= 0L }
+      ?.times(1000L)
+      ?.coerceAtLeast(0L)
+      ?: 0L
+  }
+
+  fun readLong(bundle: Bundle?, key: String): Long? {
+    if (bundle == null || !bundle.containsKey(key)) {
+      return null
+    }
+    return coerceLong(bundle.get(key))
+  }
+
+  fun readInt(bundle: Bundle?, key: String): Int? =
+    readLong(bundle, key)
+      ?.takeIf { it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }
+      ?.toInt()
+
+  fun actionLabel(action: String?): String = when (action) {
+    PowerampAPI.ACTION_TRACK_CHANGED -> "TRACK_CHANGED"
+    PowerampAPI.ACTION_TRACK_CHANGED_EXPLICIT -> "TRACK_CHANGED_EXPLICIT"
+    PowerampAPI.ACTION_STATUS_CHANGED -> "STATUS_CHANGED"
+    PowerampAPI.ACTION_STATUS_CHANGED_EXPLICIT -> "STATUS_CHANGED_EXPLICIT"
+    PowerampAPI.ACTION_PLAYING_MODE_CHANGED -> "PLAYING_MODE_CHANGED"
+    PowerampAPI.ACTION_TRACK_POS_SYNC -> "TPOS_SYNC"
+    PowerampAPI.ACTION_AA_CHANGED -> "AA_CHANGED"
+    null -> "UNKNOWN"
+    else -> action.substringAfterLast('.')
+  }
+
+  fun describeExtras(bundle: Bundle?): String {
+    if (bundle == null || bundle.isEmpty) {
+      return "none"
+    }
+
+    val keys = bundle.keySet().toList().sorted()
+    val preview = keys.take(6).joinToString(",") { key ->
+      "$key:${describeValue(bundle.get(key))}"
+    }
+    val suffix = if (keys.size > 6) ",+${keys.size - 6} more" else ""
+    return "[$preview$suffix]"
+  }
+
+  private fun describeValue(value: Any?): String = when (value) {
+    null -> "null"
+    is Bundle -> "Bundle${describeBundleKeys(value)}"
+    else -> value.javaClass.simpleName
+  }
+
+  private fun describeBundleKeys(bundle: Bundle): String {
+    if (bundle.isEmpty) {
+      return "[]"
+    }
+
+    val keys = bundle.keySet().toList().sorted()
+    val preview = keys.take(6).joinToString(",") { key ->
+      "$key:${bundle.get(key)?.javaClass?.simpleName ?: "null"}"
+    }
+    val suffix = if (keys.size > 6) ",+${keys.size - 6} more" else ""
+    return "[$preview$suffix]"
+  }
+
+  private fun coerceLong(value: Any?): Long? = when (value) {
+    null -> null
+    is Long -> value
+    is Int -> value.toLong()
+    is Short -> value.toLong()
+    is Byte -> value.toLong()
+    is String -> value.trim().toLongOrNull()
+    is Number -> value.toLong()
+    else -> null
   }
 }
