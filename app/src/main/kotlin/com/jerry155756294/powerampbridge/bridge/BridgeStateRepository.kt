@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import timber.log.Timber
 
 class BridgeStateRepository {
   private val _state = MutableStateFlow(BridgeUiState())
@@ -34,12 +35,14 @@ class BridgeStateRepository {
   }
 
   fun recordRejectedConnection(event: ConnectionEventSnapshot, reason: String) {
+    Timber.w("Rejected connection: %s", event.format(reason))
     _state.update {
       it.copy(lastRejectedReason = event.format(reason))
     }
   }
 
   fun recordDisconnect(event: ConnectionEventSnapshot, reason: String) {
+    Timber.i("Disconnect: %s", event.format(reason))
     _state.update {
       it.copy(
         lastDisconnectReason = event.format(reason),
@@ -93,14 +96,21 @@ class BridgeStateRepository {
   }
 
   fun recordCommand(message: String) {
+    Timber.d("Command: %s", message)
     _state.update { it.copy(recentCommands = addEntry(it.recentCommands, message)) }
   }
 
   fun recordProtocolEvent(message: String) {
+    Timber.d("Protocol: %s", message)
     _state.update { it.copy(recentProtocolEvents = addEntry(it.recentProtocolEvents, message)) }
   }
 
   fun recordPowerampEvent(message: String) {
+    if (!message.startsWith("Poweramp action: TPOS_SYNC") &&
+      !message.startsWith("Position sync (TPOS_SYNC):")
+    ) {
+      Timber.d("Poweramp: %s", message)
+    }
     _state.update { current ->
       current.copy(recentPowerampEvents = addPowerampEntry(current.recentPowerampEvents, message))
     }
@@ -131,6 +141,9 @@ class BridgeStateRepository {
   }
 
   fun setError(message: String?) {
+    if (message != null) {
+      Timber.e("Bridge error: %s", message)
+    }
     _state.update { it.copy(lastError = message) }
   }
 
