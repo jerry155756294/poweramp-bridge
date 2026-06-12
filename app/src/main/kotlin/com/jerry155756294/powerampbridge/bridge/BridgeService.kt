@@ -49,6 +49,7 @@ class BridgeService : Service() {
   private var lastBroadcastPositionMs: Long? = null
   private var lastCoverSignalTrackId: Long? = null
   private var pendingLatencyMeasurement: PendingLatencyMeasurement? = null
+  private var latencyTimeoutJob: Job? = null
   private var lastObservedState: BridgeUiState? = null
 
   override fun onCreate() {
@@ -179,6 +180,7 @@ class BridgeService : Service() {
           pendingLatencyMeasurement?.takeIf { measurement ->
             didObserveCommandEffect(previous, state, measurement.command)
           }?.let { measurement ->
+            latencyTimeoutJob?.cancel()
             app.appContainer.stateRepository.recordLatencySample(
               command = measurement.command,
               dispatchMs = measurement.dispatchMs,
@@ -284,6 +286,7 @@ class BridgeService : Service() {
 
     if (expectsObservedUpdate(message)) {
       pendingLatencyMeasurement?.let { previous ->
+        latencyTimeoutJob?.cancel()
         app.appContainer.stateRepository.recordLatencySample(
           command = previous.command,
           dispatchMs = previous.dispatchMs,
@@ -295,6 +298,19 @@ class BridgeService : Service() {
         dispatchMs = dispatchMs,
         startedAt = startedAt
       )
+      latencyTimeoutJob?.cancel()
+      latencyTimeoutJob = scope.launch {
+        delay(LATENCY_CONFIRMATION_TIMEOUT_MS)
+        val pending = pendingLatencyMeasurement ?: return@launch
+        if (pending.command == message.context && pending.startedAt == startedAt) {
+          app.appContainer.stateRepository.recordLatencySample(
+            command = pending.command,
+            dispatchMs = pending.dispatchMs,
+            observedMs = null
+          )
+          pendingLatencyMeasurement = null
+        }
+      }
       return
     }
 
@@ -341,6 +357,7 @@ class BridgeService : Service() {
     ProtocolConstants.PlayerPause,
     ProtocolConstants.PlayerStop ->
       previous.playback.state != current.playback.state
+        || previous.playback.track.positionMs != current.playback.track.positionMs
     ProtocolConstants.PlayerNext,
     ProtocolConstants.PlayerPrevious ->
       previous.playback.track.realId != current.playback.track.realId ||
@@ -432,6 +449,7 @@ class BridgeService : Service() {
     private const val NOTIFICATION_ID = 1001
     private const val POSITION_TICK_MS = 1000L
     private const val POSITION_RESYNC_INTERVAL = 5
+    private const val LATENCY_CONFIRMATION_TIMEOUT_MS = 1500L
     private const val ACTION_STOP = "com.jerry155756294.powerampbridge.action.STOP"
     private const val ACTION_RESTART = "com.jerry155756294.powerampbridge.action.RESTART"
 

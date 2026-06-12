@@ -101,7 +101,9 @@ class BridgeStateRepository {
   }
 
   fun recordPowerampEvent(message: String) {
-    _state.update { it.copy(recentPowerampEvents = addEntry(it.recentPowerampEvents, message)) }
+    _state.update { current ->
+      current.copy(recentPowerampEvents = addPowerampEntry(current.recentPowerampEvents, message))
+    }
   }
 
   fun recordLatencySample(
@@ -134,4 +136,28 @@ class BridgeStateRepository {
 
   private fun addEntry(existing: List<LogEntry>, message: String): List<LogEntry> =
     (listOf(LogEntry.create(message)) + existing).take(20)
+
+  private fun addPowerampEntry(existing: List<LogEntry>, message: String): List<LogEntry> {
+    if (message.startsWith("Poweramp action: TPOS_SYNC")) {
+      return existing
+    }
+
+    if (message.startsWith("Position sync (TPOS_SYNC):")) {
+      val latest = existing.firstOrNull()
+      val lastPos = message.substringAfterLast(':').trim()
+      if (latest != null && latest.message.startsWith("TPOS_SYNC x ")) {
+        val currentCount = latest.message
+          .substringAfter("TPOS_SYNC x ")
+          .substringBefore(',')
+          .toIntOrNull()
+          ?: 1
+        val replacement = latest.copy(message = "TPOS_SYNC x ${currentCount + 1}, last pos=$lastPos")
+        return listOf(replacement) + existing.drop(1)
+      }
+
+      return addEntry(existing, "TPOS_SYNC x 1, last pos=$lastPos")
+    }
+
+    return addEntry(existing, message)
+  }
 }

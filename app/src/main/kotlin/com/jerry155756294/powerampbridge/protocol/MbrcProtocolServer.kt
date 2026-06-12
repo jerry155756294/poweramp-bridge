@@ -2,6 +2,7 @@ package com.jerry155756294.powerampbridge.protocol
 
 import java.io.BufferedReader
 import java.io.BufferedWriter
+import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.io.PrintWriter
@@ -144,7 +145,11 @@ class MbrcProtocolServer(
     } catch (error: Exception) {
       closeReason = "socket_read_error:${error.javaClass.simpleName}"
       mutex.withLock { protocolManager.markDisconnectCategory(socketId, closeReason) }
-      Timber.w(error, "Client loop ended for %s", remoteAddress)
+      if (error is IOException && isExpectedSocketClose(error)) {
+        Timber.d("Client loop closed normally for %s: %s", remoteAddress, error.message)
+      } else {
+        Timber.w(error, "Client loop ended for %s", remoteAddress)
+      }
     } finally {
       val closeSnapshot = mutex.withLock {
         val category = protocolManager.inferCloseCategory(socketId)
@@ -216,6 +221,14 @@ class MbrcProtocolServer(
       }
     }
     staleSessions.forEach { it.close() }
+  }
+
+  private fun isExpectedSocketClose(error: IOException): Boolean {
+    val message = error.message.orEmpty()
+    return message.contains("Socket closed", ignoreCase = true) ||
+      message.contains("Stream closed", ignoreCase = true) ||
+      message.contains("Connection reset", ignoreCase = true) ||
+      message.contains("Broken pipe", ignoreCase = true)
   }
 
   private fun shortSocketId(socketId: String): String = socketId.take(8)

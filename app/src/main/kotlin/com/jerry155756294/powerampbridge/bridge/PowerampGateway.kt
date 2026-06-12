@@ -38,7 +38,6 @@ class PowerampGateway(
           PowerampAPI.ACTION_STATUS_CHANGED_EXPLICIT -> handleStatus(intent, actionLabel)
           PowerampAPI.ACTION_PLAYING_MODE_CHANGED -> handlePlayingMode(intent, actionLabel)
           PowerampAPI.ACTION_TRACK_POS_SYNC -> handlePosition(intent, actionLabel)
-          PowerampAPI.ACTION_AA_CHANGED -> handleAaChanged(actionLabel)
         }
       }.onFailure { error ->
         Timber.e(error, "Failed handling Poweramp broadcast: %s", intent.action)
@@ -62,7 +61,6 @@ class PowerampGateway(
       addAction(PowerampAPI.ACTION_STATUS_CHANGED_EXPLICIT)
       addAction(PowerampAPI.ACTION_PLAYING_MODE_CHANGED)
       addAction(PowerampAPI.ACTION_TRACK_POS_SYNC)
-      addAction(PowerampAPI.ACTION_AA_CHANGED)
     }
     ContextCompat.registerReceiver(
       context,
@@ -297,11 +295,6 @@ class PowerampGateway(
     stateRepository.recordPowerampEvent("Position sync ($actionLabel): ${positionSec}s")
   }
 
-  private fun handleAaChanged(actionLabel: String) {
-    invalidateCoverCache()
-    stateRepository.recordPowerampEvent("AA changed ($actionLabel): cover cache invalidated")
-  }
-
   private fun sendCommand(command: Int, configure: (Intent) -> Unit = {}): Boolean {
     if (!refreshAvailability()) {
       stateRepository.setError("Poweramp not available")
@@ -405,7 +398,6 @@ internal object PowerampBroadcastDiagnostics {
     PowerampAPI.ACTION_STATUS_CHANGED_EXPLICIT -> "STATUS_CHANGED_EXPLICIT"
     PowerampAPI.ACTION_PLAYING_MODE_CHANGED -> "PLAYING_MODE_CHANGED"
     PowerampAPI.ACTION_TRACK_POS_SYNC -> "TPOS_SYNC"
-    PowerampAPI.ACTION_AA_CHANGED -> "AA_CHANGED"
     null -> "UNKNOWN"
     else -> action.substringAfterLast('.')
   }

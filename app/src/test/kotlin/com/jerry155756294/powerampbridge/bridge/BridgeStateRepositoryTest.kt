@@ -45,4 +45,16 @@ class BridgeStateRepositoryTest {
     assertEquals(120L, latency.maxMs)
     assertEquals(2, latency.sampleCount)
   }
+
+  @Test
+  fun `poweramp tpos sync events are collapsed`() {
+    repository.recordPowerampEvent("Poweramp action: TPOS_SYNC extras=[api:Integer,pos:Integer]")
+    repository.recordPowerampEvent("Position sync (TPOS_SYNC): 12s")
+    repository.recordPowerampEvent("Poweramp action: TPOS_SYNC extras=[api:Integer,pos:Integer]")
+    repository.recordPowerampEvent("Position sync (TPOS_SYNC): 14s")
+
+    val events = repository.state.value.recentPowerampEvents
+    assertEquals(1, events.size)
+    assertEquals("TPOS_SYNC x 2, last pos=14s", events.first().message)
+  }
 }
