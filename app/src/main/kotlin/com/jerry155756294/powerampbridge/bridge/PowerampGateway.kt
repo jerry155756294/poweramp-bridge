@@ -4,12 +4,15 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.AudioManager
 import android.os.Bundle
 import android.util.Base64
 import androidx.core.content.ContextCompat
 import com.maxmpz.poweramp.player.PowerampAPI
 import com.maxmpz.poweramp.player.PowerampAPIHelper
+import java.io.ByteArrayOutputStream
 import kotlin.math.ceil
 import timber.log.Timber
 
@@ -338,18 +341,73 @@ class PowerampGateway(
 
     cachedCover?.takeIf { it.realId == realId }?.let { return it.base64 }
 
-    val base64 = runCatching {
-      val uri = PowerampAPI.AA_ROOT_URI.buildUpon()
-        .appendEncodedPath("files")
-        .appendEncodedPath(realId.toString())
-        .build()
-      context.contentResolver.openInputStream(uri)?.use { stream ->
-        Base64.encodeToString(stream.readBytes(), Base64.NO_WRAP)
+    val uri = PowerampAPI.AA_ROOT_URI.buildUpon()
+      .appendEncodedPath("files")
+      .appendEncodedPath(realId.toString())
+      .build()
+    val base64 = runCatching { loadScaledCoverBase64(uri.toString()) }
+      .onFailure { error ->
+        Timber.w(error, "Failed to load cover for track %s", realId)
       }
-    }.getOrNull()
+      .getOrNull()
 
     cachedCover = CachedCover(realId = realId, base64 = base64)
     return base64
+  }
+
+  private fun loadScaledCoverBase64(uri: String): String? {
+    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openFileDescriptor(android.net.Uri.parse(uri), "r")?.use { descriptor ->
+      BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, options)
+    } ?: return null
+
+    val sampleSize = calculateSampleSize(options.outWidth, options.outHeight, MAX_COVER_DIMENSION)
+    val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    val bitmap = context.contentResolver.openFileDescriptor(android.net.Uri.parse(uri), "r")?.use { descriptor ->
+      BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, decodeOptions)
+    } ?: return null
+
+    return bitmap.useScaledBase64()
+  }
+
+  private fun Bitmap.useScaledBase64(): String {
+    val scaled = scaleBitmapIfNeeded(this, MAX_COVER_DIMENSION)
+    return try {
+      ByteArrayOutputStream().use { output ->
+        scaled.compress(Bitmap.CompressFormat.JPEG, COVER_JPEG_QUALITY, output)
+        Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
+      }
+    } finally {
+      if (scaled !== this) {
+        scaled.recycle()
+      }
+      recycle()
+    }
+  }
+
+  private fun scaleBitmapIfNeeded(bitmap: Bitmap, maxDimension: Int): Bitmap {
+    val width = bitmap.width
+    val height = bitmap.height
+    if (width <= maxDimension && height <= maxDimension) {
+      return bitmap
+    }
+
+    val scale = minOf(maxDimension.toFloat() / width, maxDimension.toFloat() / height)
+    val targetWidth = (width * scale).toInt().coerceAtLeast(1)
+    val targetHeight = (height * scale).toInt().coerceAtLeast(1)
+    return Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
+  }
+
+  private fun calculateSampleSize(width: Int, height: Int, maxDimension: Int): Int {
+    var sampleSize = 1
+    var nextWidth = width
+    var nextHeight = height
+    while (nextWidth > maxDimension || nextHeight > maxDimension) {
+      sampleSize *= 2
+      nextWidth /= 2
+      nextHeight /= 2
+    }
+    return sampleSize.coerceAtLeast(1)
   }
 
   private data class CachedCover(
@@ -361,6 +419,8 @@ class PowerampGateway(
     const val READY_COVER_STATUS = 1
     const val SUCCESS_COVER_STATUS = 200
     const val NOT_FOUND_COVER_STATUS = 404
+    const val MAX_COVER_DIMENSION = 512
+    const val COVER_JPEG_QUALITY = 85
   }
 }
 

@@ -86,6 +86,37 @@ class ProtocolSessionManagerTest {
   }
 
   @Test
+  fun `request socket auto initializes reconnecting broadcast for same client`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+
+    val waitingSnapshot = manager.connectionDebugSnapshot("broadcast")
+    assertEquals(HandshakeState.AWAITING_INIT, waitingSnapshot?.handshakeState)
+    assertFalse(waitingSnapshot?.broadcastInitialized == true)
+
+    manager.registerConnection("request", "10.0.0.2")
+    manager.processMessage("request", IncomingMessage(ProtocolConstants.Player, "Android"))
+    val requestProtocolResult = manager.processMessage(
+      "request",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to true, "client_id" to "sender-1")
+      )
+    )
+
+    assertTrue(requestProtocolResult.sessionChanged)
+    assertTrue(requestProtocolResult.sessionSnapshot?.broadcastInitialized == true)
+    assertEquals(HandshakeState.READY, manager.connectionDebugSnapshot("broadcast")?.handshakeState)
+  }
+
+  @Test
   fun `verifyconnection is allowed before handshake`() {
     manager.registerConnection("probe", "10.0.0.3")
 
