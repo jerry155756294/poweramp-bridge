@@ -3,13 +3,13 @@ package com.jerry155756294.powerampbridge.protocol
 import com.jerry155756294.powerampbridge.BuildConfig
 import com.jerry155756294.powerampbridge.bridge.BridgeStateRepository
 import com.jerry155756294.powerampbridge.bridge.BridgeUiState
-import com.jerry155756294.powerampbridge.bridge.PowerampGateway
+import com.jerry155756294.powerampbridge.bridge.PowerampController
 import org.json.JSONObject
 
 class MbrcProtocolAdapter(
   private val codec: JsonMessageCodec,
   private val stateRepository: BridgeStateRepository,
-  private val powerampGateway: PowerampGateway
+  private val powerampGateway: PowerampController
 ) {
   data class PageRequest(
     val offset: Int = 0,
@@ -143,10 +143,15 @@ class MbrcProtocolAdapter(
       ProtocolConstants.PlaylistPlay,
       ProtocolConstants.LibraryPlayAll,
       ProtocolConstants.PlayerMute ->
-        commandUnavailable(message.context)
+        unsupportedNoOp(message)
 
-      else ->
-        listOf(codec.encode(ProtocolConstants.UnknownCommand, message.context))
+      else -> {
+        if (isLibraryClickContext(message.context)) {
+          unsupportedNoOp(message)
+        } else {
+          listOf(codec.encode(ProtocolConstants.UnknownCommand, message.context))
+        }
+      }
     }
   }
 
@@ -277,6 +282,39 @@ class MbrcProtocolAdapter(
 
   private fun commandUnavailable(context: String): List<String> =
     listOf(codec.encode(ProtocolConstants.CommandUnavailable, context))
+
+  private fun unsupportedNoOp(message: IncomingMessage): List<String> {
+    stateRepository.recordProtocolEvent(
+      "unsupported_noop:${message.context}:data=${payloadShape(message.data)}"
+    )
+    return listOf(
+      codec.encode(
+        message.context,
+        mapOf(
+          "status" to 200,
+          "accepted" to false,
+          "unsupported" to true
+        )
+      )
+    )
+  }
+
+  private fun isLibraryClickContext(context: String): Boolean {
+    val normalized = context.lowercase()
+    return normalized.startsWith("library") ||
+      normalized.startsWith("playlist") ||
+      normalized.startsWith("browse")
+  }
+
+  private fun payloadShape(data: Any?): String = when (data) {
+    null -> "null"
+    is Map<*, *> -> data.keys.joinToString(prefix = "map[", postfix = "]") { it.toString() }
+    is List<*> -> "list[size=${data.size}]"
+    is Number -> "number"
+    is Boolean -> "boolean"
+    is String -> "string"
+    else -> data.javaClass.simpleName
+  }
 
   private fun commandResult(success: Boolean, context: String): List<String> =
     if (success) emptyList() else commandUnavailable(context)

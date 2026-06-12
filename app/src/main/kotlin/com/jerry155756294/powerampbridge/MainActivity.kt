@@ -367,7 +367,8 @@ private fun formatLatency(uiState: BridgeUiState, advancedMode: Boolean): String
   val last = latency.lastObservedMs ?: latency.lastDispatchMs ?: average
   return if (advancedMode) {
     val observed = latency.lastObservedMs?.let { "${it}ms" } ?: "unconfirmed"
-    "last=${last}ms | dispatch=${latency.lastDispatchMs ?: 0}ms | observed=$observed | avg=${average}ms | max=${max}ms | samples=${latency.sampleCount}"
+    val effect = latency.lastEffectStatus ?: "unknown"
+    "last=${last}ms | dispatch=${latency.lastDispatchMs ?: 0}ms | observed=$observed | effect=$effect | avg=${average}ms | max=${max}ms | samples=${latency.sampleCount}"
   } else {
     "avg ${average}ms | max ${max}ms | last ${last}ms"
   }

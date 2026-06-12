@@ -19,6 +19,7 @@ class BridgeStateRepositoryTest {
     assertEquals("playerplay", latency.lastCommand)
     assertEquals(45L, latency.lastDispatchMs)
     assertNull(latency.lastObservedMs)
+    assertEquals("dispatch_only", latency.lastEffectStatus)
     assertEquals(45L, latency.averageMs)
     assertEquals(45L, latency.maxMs)
     assertEquals(1, latency.sampleCount)
@@ -29,7 +30,8 @@ class BridgeStateRepositoryTest {
     repository.recordLatencySample(
       command = "playerplay",
       dispatchMs = 30L,
-      observedMs = 120L
+      observedMs = 120L,
+      effectStatus = "confirmed:playback_state"
     )
     repository.recordLatencySample(
       command = "playerpause",
@@ -41,6 +43,7 @@ class BridgeStateRepositoryTest {
     assertEquals("playerpause", latency.lastCommand)
     assertEquals(40L, latency.lastDispatchMs)
     assertNull(latency.lastObservedMs)
+    assertEquals("dispatch_only", latency.lastEffectStatus)
     assertEquals(80L, latency.averageMs)
     assertEquals(120L, latency.maxMs)
     assertEquals(2, latency.sampleCount)
@@ -56,5 +59,13 @@ class BridgeStateRepositoryTest {
     val events = repository.state.value.recentPowerampEvents
     assertEquals(1, events.size)
     assertEquals("TPOS_SYNC x 2, last pos=14s", events.first().message)
+  }
+
+  @Test
+  fun `cover signal revision increments`() {
+    repository.signalCoverChanged("test")
+    repository.signalCoverChanged("test")
+
+    assertEquals(2L, repository.state.value.coverSignalRevision)
   }
 }

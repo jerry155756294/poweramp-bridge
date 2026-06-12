@@ -119,9 +119,17 @@ class BridgeStateRepository {
   fun recordLatencySample(
     command: String,
     dispatchMs: Long,
-    observedMs: Long?
+    observedMs: Long?,
+    effectStatus: String = if (observedMs == null) "dispatch_only" else "confirmed"
   ) {
     val effectiveMs = observedMs ?: dispatchMs
+    Timber.d(
+      "Latency: command=%s dispatch_ms=%d observed_ms=%s status=%s",
+      command,
+      dispatchMs,
+      observedMs?.toString() ?: "unconfirmed",
+      effectStatus
+    )
     _state.update { current ->
       val previous = current.latencySummary
       val sampleCount = previous.sampleCount + 1
@@ -131,12 +139,20 @@ class BridgeStateRepository {
           lastCommand = command,
           lastDispatchMs = dispatchMs,
           lastObservedMs = observedMs,
+          lastEffectStatus = effectStatus,
           averageMs = totalMs / sampleCount,
           maxMs = maxOf(previous.maxMs ?: 0L, effectiveMs),
           sampleCount = sampleCount,
           totalMs = totalMs
         )
       )
+    }
+  }
+
+  fun signalCoverChanged(reason: String) {
+    Timber.d("Cover signal: %s", reason)
+    _state.update { current ->
+      current.copy(coverSignalRevision = current.coverSignalRevision + 1L)
     }
   }
 

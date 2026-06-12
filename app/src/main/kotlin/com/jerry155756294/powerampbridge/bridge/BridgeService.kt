@@ -33,6 +33,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import timber.log.Timber
 
 class BridgeService : Service() {
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -48,6 +49,7 @@ class BridgeService : Service() {
   private var lastStatusBroadcastPayload: List<String>? = null
   private var lastBroadcastPositionMs: Long? = null
   private var lastCoverSignalTrackId: Long? = null
+  private var lastCoverSignalRevision: Long? = null
   private var pendingLatencyMeasurement: PendingLatencyMeasurement? = null
   private var latencyTimeoutJob: Job? = null
   private var lastObservedState: BridgeUiState? = null
@@ -69,6 +71,7 @@ class BridgeService : Service() {
         val startedAt = SystemClock.elapsedRealtime()
         val replies = adapter.handleCommand(message)
         val dispatchMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+        recordRequestTiming(message, dispatchMs, replies)
         recordLatencyMeasurement(message, dispatchMs, startedAt)
         return replies
       }
@@ -87,6 +90,7 @@ class BridgeService : Service() {
           )
           lastBroadcastPositionMs = state.playback.track.positionMs
           lastCoverSignalTrackId = state.playback.track.realId
+          lastCoverSignalRevision = state.coverSignalRevision
         }
 
       override suspend fun onSessionChanged(snapshot: LogicalClientSnapshot?) {
@@ -96,6 +100,7 @@ class BridgeService : Service() {
           lastStatusBroadcastPayload = null
           lastBroadcastPositionMs = null
           lastCoverSignalTrackId = null
+          lastCoverSignalRevision = null
         }
       }
 
@@ -184,7 +189,8 @@ class BridgeService : Service() {
             app.appContainer.stateRepository.recordLatencySample(
               command = measurement.command,
               dispatchMs = measurement.dispatchMs,
-              observedMs = (SystemClock.elapsedRealtime() - measurement.startedAt).coerceAtLeast(0L)
+              observedMs = (SystemClock.elapsedRealtime() - measurement.startedAt).coerceAtLeast(0L),
+              effectStatus = "confirmed:${expectedEffectType(measurement.command)}"
             )
             pendingLatencyMeasurement = null
           }
@@ -205,8 +211,11 @@ class BridgeService : Service() {
           includeCover = false
         )
         val shouldSendCoverSignal =
-          state.playback.track.realId != lastCoverSignalTrackId &&
-            (state.playback.track.realId > 0L || lastCoverSignalTrackId != null)
+          (
+            state.playback.track.realId != lastCoverSignalTrackId &&
+              (state.playback.track.realId > 0L || lastCoverSignalTrackId != null)
+            ) ||
+            state.coverSignalRevision != lastCoverSignalRevision
 
         val messages = buildList {
           if (statusPayload != lastStatusBroadcastPayload) {
@@ -225,6 +234,7 @@ class BridgeService : Service() {
           lastBroadcastPositionMs = state.playback.track.positionMs
           if (shouldSendCoverSignal) {
             lastCoverSignalTrackId = state.playback.track.realId
+            lastCoverSignalRevision = state.coverSignalRevision
           }
           launch(Dispatchers.IO) {
             server.sendBroadcast(messages)
@@ -290,7 +300,8 @@ class BridgeService : Service() {
         app.appContainer.stateRepository.recordLatencySample(
           command = previous.command,
           dispatchMs = previous.dispatchMs,
-          observedMs = null
+          observedMs = null,
+          effectStatus = "superseded:${expectedEffectType(previous.command)}"
         )
       }
       pendingLatencyMeasurement = PendingLatencyMeasurement(
@@ -306,7 +317,8 @@ class BridgeService : Service() {
           app.appContainer.stateRepository.recordLatencySample(
             command = pending.command,
             dispatchMs = pending.dispatchMs,
-            observedMs = null
+            observedMs = null,
+            effectStatus = "unconfirmed:${expectedEffectType(pending.command)}"
           )
           pendingLatencyMeasurement = null
         }
@@ -317,8 +329,28 @@ class BridgeService : Service() {
     app.appContainer.stateRepository.recordLatencySample(
       command = message.context,
       dispatchMs = dispatchMs,
-      observedMs = null
+      observedMs = null,
+      effectStatus = "dispatch_only"
     )
+  }
+
+  private suspend fun recordRequestTiming(
+    message: IncomingMessage,
+    dispatchMs: Long,
+    replies: List<String>
+  ) {
+    val replyBytes = replies.sumOf { it.length }
+    val logLine = "request_timing:${message.context}:dispatch=${dispatchMs}ms:replies=${replies.size}:bytes=$replyBytes"
+    when {
+      dispatchMs >= VERY_SLOW_REQUEST_MS -> {
+        Timber.w("Very slow request: %s", logLine)
+        app.appContainer.stateRepository.recordProtocolEvent("very_slow_$logLine")
+      }
+      dispatchMs >= SLOW_REQUEST_MS -> {
+        Timber.d("Slow request: %s", logLine)
+        app.appContainer.stateRepository.recordProtocolEvent("slow_$logLine")
+      }
+    }
   }
 
   private fun shouldMeasureLatency(message: IncomingMessage): Boolean = when (message.context) {
@@ -372,6 +404,20 @@ class BridgeService : Service() {
     ProtocolConstants.NowPlayingPosition ->
       previous.playback.track.positionMs != current.playback.track.positionMs
     else -> false
+  }
+
+  private fun expectedEffectType(command: String): String = when (command) {
+    ProtocolConstants.PlayerPlayPause,
+    ProtocolConstants.PlayerPlay,
+    ProtocolConstants.PlayerPause,
+    ProtocolConstants.PlayerStop -> "playback_state"
+    ProtocolConstants.PlayerNext,
+    ProtocolConstants.PlayerPrevious -> "track_change"
+    ProtocolConstants.PlayerVolume -> "volume"
+    ProtocolConstants.PlayerShuffle -> "shuffle"
+    ProtocolConstants.PlayerRepeat -> "repeat"
+    ProtocolConstants.NowPlayingPosition -> "position"
+    else -> "none"
   }
 
   private fun buildNotification(state: BridgeUiState): Notification {
@@ -450,6 +496,8 @@ class BridgeService : Service() {
     private const val POSITION_TICK_MS = 1000L
     private const val POSITION_RESYNC_INTERVAL = 5
     private const val LATENCY_CONFIRMATION_TIMEOUT_MS = 1500L
+    private const val SLOW_REQUEST_MS = 250L
+    private const val VERY_SLOW_REQUEST_MS = 1000L
     private const val ACTION_STOP = "com.jerry155756294.powerampbridge.action.STOP"
     private const val ACTION_RESTART = "com.jerry155756294.powerampbridge.action.RESTART"
 

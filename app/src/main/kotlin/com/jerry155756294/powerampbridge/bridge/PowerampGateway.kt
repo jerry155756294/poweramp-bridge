@@ -8,23 +8,32 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioManager
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Base64
 import androidx.core.content.ContextCompat
 import com.maxmpz.poweramp.player.PowerampAPI
 import com.maxmpz.poweramp.player.PowerampAPIHelper
 import java.io.ByteArrayOutputStream
 import kotlin.math.ceil
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import timber.log.Timber
 
 class PowerampGateway(
   private val context: Context,
   private val stateRepository: BridgeStateRepository
-) {
+) : PowerampController {
   private val audioManager =
     context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
   private var registered = false
   private var cachedCover: CachedCover? = null
+  private var coverLoadJob: Job? = null
+  private var loadingCoverRealId: Long? = null
+  private val coverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
   private val receiver = object : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -80,6 +89,8 @@ class PowerampGateway(
     if (!registered) return
     runCatching { context.unregisterReceiver(receiver) }
     registered = false
+    coverLoadJob?.cancel()
+    loadingCoverRealId = null
   }
 
   fun refreshAvailability(): Boolean {
@@ -95,30 +106,48 @@ class PowerampGateway(
     sendCommand(PowerampAPI.Commands.POS_SYNC)
   }
 
-  fun refreshVolumeSnapshot() {
+  override fun refreshVolumeSnapshot() {
     updateVolumeSnapshot()
   }
 
-  fun currentCoverStatus(): Int =
-    if (currentCoverBase64() != null) READY_COVER_STATUS else NOT_FOUND_COVER_STATUS
+  override fun currentCoverStatus(): Int {
+    val realId = stateRepository.state.value.playback.track.realId
+    if (realId <= 0L) {
+      return NOT_FOUND_COVER_STATUS
+    }
+    cachedCover?.takeIf { it.realId == realId && it.base64 != null }?.let {
+      return READY_COVER_STATUS
+    }
+    ensureCoverLoading(realId)
+    return NOT_FOUND_COVER_STATUS
+  }
 
-  fun currentCoverPayload(): Map<String, Any?> {
-    val cover = currentCoverBase64()
+  override fun currentCoverPayload(): Map<String, Any?> {
+    val realId = stateRepository.state.value.playback.track.realId
+    if (realId <= 0L) {
+      stateRepository.recordPowerampEvent("Cover reply: missing track")
+      return mapOf("status" to NOT_FOUND_COVER_STATUS, "cover" to null)
+    }
+
+    val cover = cachedCover?.takeIf { it.realId == realId }?.base64
     return if (cover != null) {
+      stateRepository.recordPowerampEvent("Cover reply: cached")
       mapOf("status" to SUCCESS_COVER_STATUS, "cover" to cover)
     } else {
+      ensureCoverLoading(realId)
+      stateRepository.recordPowerampEvent("Cover reply: pending")
       mapOf("status" to NOT_FOUND_COVER_STATUS, "cover" to null)
     }
   }
 
-  fun playPause(): Boolean = sendCommand(PowerampAPI.Commands.TOGGLE_PLAY_PAUSE)
-  fun play(): Boolean = sendCommand(PowerampAPI.Commands.PLAY)
-  fun pause(): Boolean = sendCommand(PowerampAPI.Commands.PAUSE)
-  fun stopPlayback(): Boolean = sendCommand(PowerampAPI.Commands.STOP)
-  fun next(): Boolean = sendCommand(PowerampAPI.Commands.NEXT)
-  fun previous(): Boolean = sendCommand(PowerampAPI.Commands.PREVIOUS)
+  override fun playPause(): Boolean = sendCommand(PowerampAPI.Commands.TOGGLE_PLAY_PAUSE)
+  override fun play(): Boolean = sendCommand(PowerampAPI.Commands.PLAY)
+  override fun pause(): Boolean = sendCommand(PowerampAPI.Commands.PAUSE)
+  override fun stopPlayback(): Boolean = sendCommand(PowerampAPI.Commands.STOP)
+  override fun next(): Boolean = sendCommand(PowerampAPI.Commands.NEXT)
+  override fun previous(): Boolean = sendCommand(PowerampAPI.Commands.PREVIOUS)
 
-  fun seekTo(positionMs: Long): Boolean {
+  override fun seekTo(positionMs: Long): Boolean {
     val clampedMs = positionMs.coerceAtLeast(0L)
     val boundedMs = stateRepository.state.value.playback.track.durationMs
       .takeIf { it > 0L }
@@ -132,7 +161,7 @@ class PowerampGateway(
     }
   }
 
-  fun setShuffle(mode: String): Boolean {
+  override fun setShuffle(mode: String): Boolean {
     val normalized = when (mode.lowercase()) {
       "shuffle", "on" -> "shuffle"
       else -> "off"
@@ -150,12 +179,12 @@ class PowerampGateway(
     return success
   }
 
-  fun toggleShuffle(): Boolean {
+  override fun toggleShuffle(): Boolean {
     val current = stateRepository.state.value.playback.shuffle
     return setShuffle(if (current == "shuffle") "off" else "shuffle")
   }
 
-  fun setRepeat(mode: String): Boolean {
+  override fun setRepeat(mode: String): Boolean {
     val normalized = when (mode.lowercase()) {
       "all" -> "all"
       "one" -> "one"
@@ -175,7 +204,7 @@ class PowerampGateway(
     return success
   }
 
-  fun toggleRepeat(): Boolean {
+  override fun toggleRepeat(): Boolean {
     val current = stateRepository.state.value.playback.repeat
     val next = when (current) {
       "none" -> "all"
@@ -185,7 +214,7 @@ class PowerampGateway(
     return setRepeat(next)
   }
 
-  fun setVolume(volumePercent: Int) {
+  override fun setVolume(volumePercent: Int) {
     val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
     val clamped = volumePercent.coerceIn(0, 100)
     val streamValue = ((clamped / 100f) * max).toInt().coerceIn(0, max)
@@ -327,32 +356,51 @@ class PowerampGateway(
     if (cachedCover?.realId != realId) {
       cachedCover = null
     }
+    if (loadingCoverRealId != realId) {
+      coverLoadJob?.cancel()
+      loadingCoverRealId = null
+    }
   }
 
   private fun invalidateCoverCache() {
     cachedCover = null
+    coverLoadJob?.cancel()
+    loadingCoverRealId = null
   }
 
-  private fun currentCoverBase64(): String? {
-    val realId = stateRepository.state.value.playback.track.realId
-    if (realId <= 0L) {
-      return null
+  private fun ensureCoverLoading(realId: Long) {
+    if (realId <= 0L) return
+    if (cachedCover?.realId == realId && cachedCover?.base64 != null) return
+    if (loadingCoverRealId == realId && coverLoadJob?.isActive == true) return
+
+    coverLoadJob?.cancel()
+    loadingCoverRealId = realId
+    coverLoadJob = coverScope.launch {
+      val startedAt = SystemClock.elapsedRealtime()
+      val base64 = loadCoverBase64(realId)
+      val elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+      cachedCover = CachedCover(realId = realId, base64 = base64)
+      loadingCoverRealId = null
+      stateRepository.recordPowerampEvent(
+        "Cover load ${if (base64 != null) "cached" else "missing"}: ${elapsedMs}ms"
+      )
+      stateRepository.signalCoverChanged("cover_load_finished:$realId")
     }
+  }
 
-    cachedCover?.takeIf { it.realId == realId }?.let { return it.base64 }
-
+  private fun loadCoverBase64(realId: Long): String? {
     val uri = PowerampAPI.AA_ROOT_URI.buildUpon()
       .appendEncodedPath("files")
       .appendEncodedPath(realId.toString())
       .build()
-    val base64 = runCatching { loadScaledCoverBase64(uri.toString()) }
+    return runCatching { loadScaledCoverBase64(uri.toString()) }
       .onFailure { error ->
         Timber.w(error, "Failed to load cover for track %s", realId)
+        stateRepository.recordPowerampEvent(
+          "Cover load error: ${error.javaClass.simpleName}: ${error.message ?: "no-message"}"
+        )
       }
       .getOrNull()
-
-    cachedCover = CachedCover(realId = realId, base64 = base64)
-    return base64
   }
 
   private fun loadScaledCoverBase64(uri: String): String? {
