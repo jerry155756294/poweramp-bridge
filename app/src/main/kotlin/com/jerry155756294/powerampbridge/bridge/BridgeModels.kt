@@ -62,6 +62,16 @@ data class ConnectionEventSnapshot(
   val lastOutgoingContext: String? = null
 )
 
+data class LatencySummary(
+  val lastCommand: String? = null,
+  val lastDispatchMs: Long? = null,
+  val lastObservedMs: Long? = null,
+  val averageMs: Long? = null,
+  val maxMs: Long? = null,
+  val sampleCount: Int = 0,
+  val totalMs: Long = 0L
+)
+
 data class BridgeUiState(
   val serviceRunning: Boolean = false,
   val listenerActive: Boolean = false,
@@ -83,6 +93,7 @@ data class BridgeUiState(
   val lastDisconnectHandshakeState: String? = null,
   val lastDisconnectLastCommand: String? = null,
   val lastDisconnectLastReply: String? = null,
+  val latencySummary: LatencySummary = LatencySummary(),
   val positionSyncActive: Boolean = false,
   val playback: PlaybackSnapshot = PlaybackSnapshot(),
   val recentCommands: List<LogEntry> = emptyList(),

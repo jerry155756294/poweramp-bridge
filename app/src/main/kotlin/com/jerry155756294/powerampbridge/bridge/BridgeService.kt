@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.jerry155756294.powerampbridge.BridgeApplication
@@ -22,6 +23,7 @@ import com.jerry155756294.powerampbridge.protocol.ConnectionDebugSnapshot
 import com.jerry155756294.powerampbridge.protocol.MbrcProtocolAdapter
 import com.jerry155756294.powerampbridge.protocol.MbrcProtocolServer
 import com.jerry155756294.powerampbridge.protocol.ProtocolClientInfo
+import com.jerry155756294.powerampbridge.protocol.ProtocolConstants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +48,8 @@ class BridgeService : Service() {
   private var lastStatusBroadcastPayload: List<String>? = null
   private var lastBroadcastPositionMs: Long? = null
   private var lastCoverSignalTrackId: Long? = null
+  private var pendingLatencyMeasurement: PendingLatencyMeasurement? = null
+  private var lastObservedState: BridgeUiState? = null
 
   override fun onCreate() {
     super.onCreate()
@@ -60,7 +64,13 @@ class BridgeService : Service() {
       override suspend fun onCommand(
         clientInfo: ProtocolClientInfo,
         message: IncomingMessage
-      ): List<String> = adapter.handleCommand(message)
+      ): List<String> {
+        val startedAt = SystemClock.elapsedRealtime()
+        val replies = adapter.handleCommand(message)
+        val dispatchMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+        recordLatencyMeasurement(message, dispatchMs, startedAt)
+        return replies
+      }
 
       override suspend fun onBroadcastReady(clientInfo: ProtocolClientInfo): List<String> =
         adapter.snapshotMessages(
@@ -165,6 +175,20 @@ class BridgeService : Service() {
     stateJob?.cancel()
     stateJob = scope.launch {
       app.appContainer.stateRepository.state.collectLatest { state ->
+        lastObservedState?.let { previous ->
+          pendingLatencyMeasurement?.takeIf { measurement ->
+            didObserveCommandEffect(previous, state, measurement.command)
+          }?.let { measurement ->
+            app.appContainer.stateRepository.recordLatencySample(
+              command = measurement.command,
+              dispatchMs = measurement.dispatchMs,
+              observedMs = (SystemClock.elapsedRealtime() - measurement.startedAt).coerceAtLeast(0L)
+            )
+            pendingLatencyMeasurement = null
+          }
+        }
+        lastObservedState = state
+
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, buildNotification(state))
         syncPositionTicker(state)
@@ -247,6 +271,90 @@ class BridgeService : Service() {
     positionSyncJob?.cancel()
     positionSyncJob = null
     app.appContainer.stateRepository.setPositionSyncActive(false)
+  }
+
+  private fun recordLatencyMeasurement(
+    message: IncomingMessage,
+    dispatchMs: Long,
+    startedAt: Long
+  ) {
+    if (!shouldMeasureLatency(message)) {
+      return
+    }
+
+    if (expectsObservedUpdate(message)) {
+      pendingLatencyMeasurement?.let { previous ->
+        app.appContainer.stateRepository.recordLatencySample(
+          command = previous.command,
+          dispatchMs = previous.dispatchMs,
+          observedMs = null
+        )
+      }
+      pendingLatencyMeasurement = PendingLatencyMeasurement(
+        command = message.context,
+        dispatchMs = dispatchMs,
+        startedAt = startedAt
+      )
+      return
+    }
+
+    app.appContainer.stateRepository.recordLatencySample(
+      command = message.context,
+      dispatchMs = dispatchMs,
+      observedMs = null
+    )
+  }
+
+  private fun shouldMeasureLatency(message: IncomingMessage): Boolean = when (message.context) {
+    ProtocolConstants.PlayerPlayPause,
+    ProtocolConstants.PlayerPlay,
+    ProtocolConstants.PlayerPause,
+    ProtocolConstants.PlayerStop,
+    ProtocolConstants.PlayerNext,
+    ProtocolConstants.PlayerPrevious,
+    ProtocolConstants.PlayerShuffle,
+    ProtocolConstants.PlayerRepeat -> true
+    ProtocolConstants.PlayerVolume -> message.data != null
+    ProtocolConstants.NowPlayingPosition -> message.data != null
+    else -> false
+  }
+
+  private fun expectsObservedUpdate(message: IncomingMessage): Boolean = shouldMeasureLatency(message)
+    && when (message.context) {
+      ProtocolConstants.PlayerPlayPause,
+      ProtocolConstants.PlayerPlay,
+      ProtocolConstants.PlayerPause,
+      ProtocolConstants.PlayerStop,
+      ProtocolConstants.PlayerNext,
+      ProtocolConstants.PlayerPrevious,
+      ProtocolConstants.NowPlayingPosition -> true
+      else -> false
+    }
+
+  private fun didObserveCommandEffect(
+    previous: BridgeUiState,
+    current: BridgeUiState,
+    command: String
+  ): Boolean = when (command) {
+    ProtocolConstants.PlayerPlayPause,
+    ProtocolConstants.PlayerPlay,
+    ProtocolConstants.PlayerPause,
+    ProtocolConstants.PlayerStop ->
+      previous.playback.state != current.playback.state
+    ProtocolConstants.PlayerNext,
+    ProtocolConstants.PlayerPrevious ->
+      previous.playback.track.realId != current.playback.track.realId ||
+        previous.playback.track.path != current.playback.track.path ||
+        previous.playback.track.title != current.playback.track.title
+    ProtocolConstants.PlayerVolume ->
+      previous.playback.volume != current.playback.volume
+    ProtocolConstants.PlayerShuffle ->
+      previous.playback.shuffle != current.playback.shuffle
+    ProtocolConstants.PlayerRepeat ->
+      previous.playback.repeat != current.playback.repeat
+    ProtocolConstants.NowPlayingPosition ->
+      previous.playback.track.positionMs != current.playback.track.positionMs
+    else -> false
   }
 
   private fun buildNotification(state: BridgeUiState): Notification {
@@ -340,6 +448,12 @@ class BridgeService : Service() {
       )
     }
   }
+
+  private data class PendingLatencyMeasurement(
+    val command: String,
+    val dispatchMs: Long,
+    val startedAt: Long
+  )
 }
 
 private fun ConnectionDebugSnapshot.toEventSnapshot(): ConnectionEventSnapshot = ConnectionEventSnapshot(

@@ -147,9 +147,10 @@ class MbrcProtocolServer(
       Timber.w(error, "Client loop ended for %s", remoteAddress)
     } finally {
       val closeSnapshot = mutex.withLock {
+        val category = protocolManager.inferCloseCategory(socketId)
         val snapshot = protocolManager.connectionDebugSnapshot(socketId)
         if (snapshot?.disconnectCategory == null) {
-          protocolManager.markDisconnectCategory(socketId, inferCloseCategory(snapshot))
+          protocolManager.markDisconnectCategory(socketId, category)
         }
         protocolManager.connectionDebugSnapshot(socketId)
       }
@@ -171,12 +172,12 @@ class MbrcProtocolServer(
           protocolVersion = ProtocolConstants.ProtocolVersion,
           broadcastInitialized = false,
           requestSocketCount = 0,
-          disconnectCategory = inferCloseCategory(null)
+          disconnectCategory = "peer_closed_unknown"
         ),
         closeReason
       )
       listener.onProtocolEvent(
-        "socket_closed:${shortSocketId(socketId)}:${(connectionSnapshot?.disconnectCategory ?: inferCloseCategory(connectionSnapshot))}"
+        "socket_closed:${shortSocketId(socketId)}:${connectionSnapshot?.disconnectCategory ?: "peer_closed_unknown"}"
       )
       if (disconnectResult.sessionChanged) {
         listener.onSessionChanged(disconnectResult.sessionSnapshot)
@@ -210,20 +211,11 @@ class MbrcProtocolServer(
     if (socketIds.isEmpty()) return
     val staleSessions = mutex.withLock {
       socketIds.mapNotNull { staleSocketId ->
-        protocolManager.markDisconnectCategory(staleSocketId, "superseded_by_same_client")
+        protocolManager.markDisconnectCategory(staleSocketId, "broadcast_replaced_by_same_client")
         sessions[staleSocketId]
       }
     }
     staleSessions.forEach { it.close() }
-  }
-
-  private fun inferCloseCategory(snapshot: ConnectionDebugSnapshot?): String = when {
-    snapshot?.disconnectCategory != null -> snapshot.disconnectCategory
-    snapshot == null -> "peer_closed_unknown"
-    snapshot.handshakeState == HandshakeState.AWAITING_PLAYER -> "peer_closed_before_player"
-    !snapshot.broadcastInitialized && snapshot.handshakeState != HandshakeState.READY -> "peer_closed_during_handshake"
-    snapshot.broadcastInitialized -> "peer_closed_after_init"
-    else -> "peer_closed_request"
   }
 
   private fun shortSocketId(socketId: String): String = socketId.take(8)

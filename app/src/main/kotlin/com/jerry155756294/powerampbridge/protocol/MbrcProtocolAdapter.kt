@@ -101,7 +101,7 @@ class MbrcProtocolAdapter(
         listOf(
           codec.encode(
             ProtocolConstants.NowPlayingList,
-            nowPlayingListPayload(
+            pagedTrackPayload(
               stateRepository.state.value,
               pageRequest(message.data)
             )
@@ -109,7 +109,15 @@ class MbrcProtocolAdapter(
         )
 
       ProtocolConstants.NowPlayingQueue ->
-        listOf(codec.encode(ProtocolConstants.NowPlayingQueue, mapOf("code" to 404)))
+        listOf(
+          codec.encode(
+            ProtocolConstants.NowPlayingQueue,
+            pagedTrackPayload(
+              stateRepository.state.value,
+              pageRequest(message.data)
+            )
+          )
+        )
 
       ProtocolConstants.NowPlayingCover ->
         listOf(codec.encode(ProtocolConstants.NowPlayingCover, powerampGateway.currentCoverPayload()))
@@ -196,29 +204,34 @@ class MbrcProtocolAdapter(
     "total" to state.playback.track.durationMs
   )
 
-  private fun nowPlayingListPayload(
+  private fun pagedTrackPayload(
     state: BridgeUiState,
     request: PageRequest
   ): Map<String, Any> {
-    val track = state.playback.track
-    val items = if (track.title.isBlank() && track.path.isBlank()) {
-      emptyList()
-    } else {
-      listOf(
-        mapOf(
-          "title" to track.title,
-          "artist" to track.artist,
-          "path" to track.path,
-          "position" to 1
-        )
-      )
-    }
+    val items = trackItems(state)
     val pageData = items.drop(request.offset).take(request.limit)
     return mapOf(
       "total" to items.size,
       "offset" to request.offset,
       "limit" to request.limit,
       "data" to pageData
+    )
+  }
+
+  private fun trackItems(state: BridgeUiState): List<Map<String, Any>> {
+    val track = state.playback.track
+    if (track.title.isBlank() && track.path.isBlank()) {
+      return emptyList()
+    }
+
+    return listOf(
+      linkedMapOf(
+        "title" to track.title,
+        "artist" to track.artist,
+        "album" to track.album,
+        "path" to track.path,
+        "position" to 1
+      )
     )
   }
 

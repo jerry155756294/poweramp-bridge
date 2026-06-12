@@ -85,6 +85,7 @@ class ProtocolSessionManager(
 
     if (message.context == ProtocolConstants.VerifyConnection) {
       connection.role = SocketRole.PROBE
+      connection.probeCompleted = true
       return ProtocolEngineResult(
         replies = listOf(OutgoingMessage(ProtocolConstants.VerifyConnection, true)),
         probeAddress = connection.remoteAddress
@@ -172,6 +173,8 @@ class ProtocolSessionManager(
     connections[socketId]?.disconnectCategory = category
   }
 
+  fun inferCloseCategory(socketId: String): String = inferCloseCategory(connections[socketId])
+
   private fun handleAwaitingPlayer(
     connection: ConnectionState,
     message: IncomingMessage
@@ -244,10 +247,13 @@ class ProtocolSessionManager(
   private fun handleReady(
     connection: ConnectionState,
     message: IncomingMessage
-  ): ProtocolEngineResult = ProtocolEngineResult(
-    delegateMessage = message,
-    clientInfo = connection.toClientInfo()
-  )
+  ): ProtocolEngineResult {
+    connection.readyMessageCount += 1
+    return ProtocolEngineResult(
+      delegateMessage = message,
+      clientInfo = connection.toClientInfo()
+    )
+  }
 
   private fun attachToLogicalClient(
     connection: ConnectionState,
@@ -378,7 +384,9 @@ class ProtocolSessionManager(
     var handshakeState: HandshakeState = HandshakeState.AWAITING_PLAYER,
     var disconnectCategory: String? = null,
     var lastIncomingContext: String? = null,
-    var lastOutgoingContext: String? = null
+    var lastOutgoingContext: String? = null,
+    var readyMessageCount: Int = 0,
+    var probeCompleted: Boolean = false
   ) {
     fun toClientInfo(): ProtocolClientInfo = ProtocolClientInfo(
       remoteAddress = remoteAddress,
@@ -405,5 +413,17 @@ class ProtocolSessionManager(
       requestSocketCount = requestSocketIds.size,
       requestSocketConnected = requestSocketIds.isNotEmpty()
     )
+  }
+
+  private fun inferCloseCategory(connection: ConnectionState?): String = when {
+    connection?.disconnectCategory != null -> connection.disconnectCategory!!
+    connection == null -> "peer_closed_unknown"
+    connection.role == SocketRole.PROBE && connection.probeCompleted -> "probe_socket_completed"
+    connection.role == SocketRole.REQUEST && connection.readyMessageCount > 0 ->
+      "request_socket_peer_closed_after_command"
+    connection.role == SocketRole.REQUEST -> "request_socket_completed"
+    connection.handshakeState == HandshakeState.AWAITING_PLAYER -> "broadcast_peer_closed_before_player"
+    connection.handshakeState != HandshakeState.READY -> "broadcast_peer_closed_during_handshake"
+    else -> "broadcast_peer_closed_after_init"
   }
 }

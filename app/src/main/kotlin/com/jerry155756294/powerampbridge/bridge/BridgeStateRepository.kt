@@ -104,6 +104,30 @@ class BridgeStateRepository {
     _state.update { it.copy(recentPowerampEvents = addEntry(it.recentPowerampEvents, message)) }
   }
 
+  fun recordLatencySample(
+    command: String,
+    dispatchMs: Long,
+    observedMs: Long?
+  ) {
+    val effectiveMs = observedMs ?: dispatchMs
+    _state.update { current ->
+      val previous = current.latencySummary
+      val sampleCount = previous.sampleCount + 1
+      val totalMs = previous.totalMs + effectiveMs
+      current.copy(
+        latencySummary = previous.copy(
+          lastCommand = command,
+          lastDispatchMs = dispatchMs,
+          lastObservedMs = observedMs,
+          averageMs = totalMs / sampleCount,
+          maxMs = maxOf(previous.maxMs ?: 0L, effectiveMs),
+          sampleCount = sampleCount,
+          totalMs = totalMs
+        )
+      )
+    }
+  }
+
   fun setError(message: String?) {
     _state.update { it.copy(lastError = message) }
   }
