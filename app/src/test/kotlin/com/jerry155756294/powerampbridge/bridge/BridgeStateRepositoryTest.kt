@@ -1,11 +1,44 @@
 package com.jerry155756294.powerampbridge.bridge
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BridgeStateRepositoryTest {
   private val repository = BridgeStateRepository()
+
+  @Test
+  fun `manual stop blocks auto start until service starts again`() {
+    repository.markServiceStarted()
+    repository.markManualStopRequested()
+    repository.markServiceStopped()
+
+    val stopped = repository.state.value
+    assertFalse(stopped.shouldAutoStart(autoStartEnabled = true))
+    assertTrue(stopped.manualStopActive)
+    assertEquals("Stopped manually", stopped.serviceStopSummary)
+
+    repository.markServiceStarted()
+
+    val restarted = repository.state.value
+    assertFalse(restarted.shouldAutoStart(autoStartEnabled = true))
+    assertFalse(restarted.manualStopActive)
+    assertNull(restarted.serviceStopSummary)
+  }
+
+  @Test
+  fun `service stopping state is visible before final stop`() {
+    repository.markServiceStarted()
+    repository.markManualStopRequested()
+
+    val state = repository.state.value
+    assertTrue(state.serviceRunning)
+    assertTrue(state.serviceStopping)
+    assertTrue(state.manualStopActive)
+    assertEquals("Manual stop requested", state.serviceStopSummary)
+  }
 
   @Test
   fun `latency summary tracks dispatch only sample`() {

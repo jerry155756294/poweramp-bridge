@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.app.ServiceCompat
 import com.jerry155756294.powerampbridge.BridgeApplication
 import com.jerry155756294.powerampbridge.MainActivity
 import com.jerry155756294.powerampbridge.R
@@ -37,6 +38,7 @@ import timber.log.Timber
 
 class BridgeService : Service() {
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+  private val codec = JsonMessageCodec()
   private lateinit var app: BridgeApplication
   private lateinit var powerampGateway: PowerampGateway
   private lateinit var adapter: MbrcProtocolAdapter
@@ -53,21 +55,29 @@ class BridgeService : Service() {
   private var pendingLatencyMeasurement: PendingLatencyMeasurement? = null
   private var latencyTimeoutJob: Job? = null
   private var lastObservedState: BridgeUiState? = null
+  private var stopJob: Job? = null
+  private var manualStopRequested = false
+  private var stopCompleted = false
 
   override fun onCreate() {
     super.onCreate()
     app = application as BridgeApplication
+    val stateRepository = app.appContainer.stateRepository
     powerampGateway = PowerampGateway(this, app.appContainer.stateRepository)
     adapter = MbrcProtocolAdapter(
-      codec = JsonMessageCodec(),
-      stateRepository = app.appContainer.stateRepository,
+      codec = codec,
+      stateRepository = stateRepository,
       powerampGateway = powerampGateway
     )
-    server = MbrcProtocolServer(JsonMessageCodec(), object : MbrcProtocolServer.Listener {
+    server = MbrcProtocolServer(codec, object : MbrcProtocolServer.Listener {
       override suspend fun onCommand(
         clientInfo: ProtocolClientInfo,
         message: IncomingMessage
       ): List<String> {
+        if (stopJob?.isActive == true) {
+          stateRepository.recordProtocolEvent("service_stopping_rejected:${message.context}")
+          return listOf(codec.encode(ProtocolConstants.CommandUnavailable, message.context))
+        }
         val startedAt = SystemClock.elapsedRealtime()
         val replies = adapter.handleCommand(message)
         val dispatchMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
@@ -76,13 +86,17 @@ class BridgeService : Service() {
         return replies
       }
 
-      override suspend fun onBroadcastReady(clientInfo: ProtocolClientInfo): List<String> =
-        adapter.snapshotMessages(
-          app.appContainer.stateRepository.state.value,
+      override suspend fun onBroadcastReady(clientInfo: ProtocolClientInfo): List<String> {
+        if (stopJob?.isActive == true) {
+          return emptyList()
+        }
+
+        return adapter.snapshotMessages(
+          stateRepository.state.value,
           includePosition = true,
           includeCover = true
         ).also {
-          val state = app.appContainer.stateRepository.state.value
+          val state = stateRepository.state.value
           lastStatusBroadcastPayload = adapter.snapshotMessages(
             state,
             includePosition = false,
@@ -92,9 +106,10 @@ class BridgeService : Service() {
           lastCoverSignalTrackId = state.playback.track.realId
           lastCoverSignalRevision = state.coverSignalRevision
         }
+      }
 
       override suspend fun onSessionChanged(snapshot: LogicalClientSnapshot?) {
-        app.appContainer.stateRepository.updateSession(snapshot)
+        stateRepository.updateSession(snapshot)
         if (snapshot?.broadcastInitialized != true) {
           stopPositionTicker()
           lastStatusBroadcastPayload = null
@@ -105,25 +120,25 @@ class BridgeService : Service() {
       }
 
       override suspend fun onProbe(remoteAddress: String) {
-        app.appContainer.stateRepository.recordProbe(remoteAddress)
+        stateRepository.recordProbe(remoteAddress)
       }
 
       override suspend fun onProtocolEvent(message: String) {
-        app.appContainer.stateRepository.recordProtocolEvent(message)
+        stateRepository.recordProtocolEvent(message)
       }
 
       override suspend fun onConnectionRejected(snapshot: ConnectionDebugSnapshot, reason: String) {
-        app.appContainer.stateRepository.recordRejectedConnection(snapshot.toEventSnapshot(), reason)
+        stateRepository.recordRejectedConnection(snapshot.toEventSnapshot(), reason)
       }
 
       override suspend fun onConnectionClosed(snapshot: ConnectionDebugSnapshot, reason: String) {
-        app.appContainer.stateRepository.recordDisconnect(snapshot.toEventSnapshot(), reason)
+        stateRepository.recordDisconnect(snapshot.toEventSnapshot(), reason)
       }
     })
 
     createNotificationChannel()
-    startForeground(NOTIFICATION_ID, buildNotification(app.appContainer.stateRepository.state.value))
-    app.appContainer.stateRepository.setServiceRunning(true)
+    stateRepository.markServiceStarted()
+    startForeground(NOTIFICATION_ID, buildNotification(stateRepository.state.value))
     powerampGateway.start()
     observeSettings()
     observeState()
@@ -131,8 +146,9 @@ class BridgeService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
-      ACTION_STOP -> stopSelf()
+      ACTION_STOP -> beginServiceStop(manualStop = true)
       ACTION_RESTART -> {
+        manualStopRequested = false
         startedPort = null
         observeSettings()
       }
@@ -141,14 +157,9 @@ class BridgeService : Service() {
   }
 
   override fun onDestroy() {
-    settingsJob?.cancel()
-    stateJob?.cancel()
-    positionSyncJob?.cancel()
-    runBlocking { server.stop() }
-    powerampGateway.stop()
-    app.appContainer.stateRepository.setServiceRunning(false)
-    app.appContainer.stateRepository.setListenerState(false, activeSettings.port)
-    app.appContainer.stateRepository.updateSession(null)
+    if (!stopCompleted) {
+      runBlocking { performStopSequence() }
+    }
     scope.cancel()
     super.onDestroy()
   }
@@ -283,6 +294,62 @@ class BridgeService : Service() {
     positionSyncJob?.cancel()
     positionSyncJob = null
     app.appContainer.stateRepository.setPositionSyncActive(false)
+  }
+
+  private fun beginServiceStop(manualStop: Boolean) {
+    if (manualStop) {
+      manualStopRequested = true
+      app.appContainer.stateRepository.markManualStopRequested()
+    } else {
+      app.appContainer.stateRepository.markServiceStopping(manualStopRequested)
+    }
+
+    if (stopJob?.isActive == true || stopCompleted) {
+      return
+    }
+
+    stopJob = scope.launch {
+      performStopSequence()
+      stopSelf()
+    }
+  }
+
+  private suspend fun performStopSequence() {
+    if (stopCompleted) {
+      return
+    }
+
+    stopCompleted = true
+    if (::app.isInitialized) {
+      app.appContainer.stateRepository.markServiceStopping(manualStopRequested)
+    }
+    settingsJob?.cancel()
+    stateJob?.cancel()
+    latencyTimeoutJob?.cancel()
+    pendingLatencyMeasurement = null
+    stopPositionTicker()
+    lastStatusBroadcastPayload = null
+    lastBroadcastPositionMs = null
+    lastCoverSignalTrackId = null
+    lastCoverSignalRevision = null
+
+    if (::server.isInitialized) {
+      runCatching { server.stop() }
+        .onFailure { Timber.w(it, "Failed to stop protocol server cleanly") }
+    }
+
+    if (::powerampGateway.isInitialized) {
+      runCatching { powerampGateway.stop() }
+        .onFailure { Timber.w(it, "Failed to stop Poweramp gateway cleanly") }
+    }
+
+    if (::app.isInitialized) {
+      app.appContainer.stateRepository.updateSession(null)
+      app.appContainer.stateRepository.setListenerState(false, activeSettings.port)
+      app.appContainer.stateRepository.markServiceStopped(manualStopRequested)
+    }
+
+    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
   }
 
   private fun recordLatencyMeasurement(
@@ -465,11 +532,15 @@ class BridgeService : Service() {
     return NotificationCompat.Builder(this, CHANNEL_ID)
       .setSmallIcon(android.R.drawable.ic_media_play)
       .setContentTitle(
-        if (state.listenerActive) getString(R.string.bridge_notification_title)
-        else getString(R.string.bridge_notification_stopped)
+        when {
+          state.serviceStopping -> "Poweramp Bridge stopping"
+          state.manualStopActive && !state.serviceRunning -> "Poweramp Bridge stopped manually"
+          state.listenerActive -> getString(R.string.bridge_notification_title)
+          else -> getString(R.string.bridge_notification_stopped)
+        }
       )
       .setContentText(summary)
-      .setSubText(sessionSummary)
+      .setSubText(state.serviceStopSummary ?: sessionSummary)
       .setContentIntent(launchIntent)
       .setOngoing(activeSettings.foregroundPersistent)
       .addAction(0, getString(R.string.notification_stop), stopIntent)

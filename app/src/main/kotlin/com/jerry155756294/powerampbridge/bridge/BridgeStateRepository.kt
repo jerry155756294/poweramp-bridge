@@ -11,8 +11,62 @@ class BridgeStateRepository {
   private val _state = MutableStateFlow(BridgeUiState())
   val state: StateFlow<BridgeUiState> = _state.asStateFlow()
 
-  fun setServiceRunning(running: Boolean) {
-    _state.update { it.copy(serviceRunning = running) }
+  fun markServiceStarted() {
+    _state.update {
+      it.copy(
+        serviceRunning = true,
+        serviceStopping = false,
+        manualStopActive = false,
+        serviceStopSummary = null,
+        serviceStopDetail = null
+      )
+    }
+  }
+
+  fun markManualStopRequested() {
+    Timber.i("Manual stop requested")
+    _state.update {
+      it.copy(
+        serviceStopping = true,
+        manualStopActive = true,
+        serviceStopSummary = "Manual stop requested",
+        serviceStopDetail = "Bridge is stopping and will stay stopped until started again."
+      )
+    }
+  }
+
+  fun markServiceStopping(manualStop: Boolean = _state.value.manualStopActive) {
+    Timber.i("Service stopping (manual_stop=%s)", manualStop)
+    _state.update {
+      it.copy(
+        serviceRunning = true,
+        serviceStopping = true,
+        manualStopActive = manualStop,
+        serviceStopSummary = if (manualStop) "Manual stop requested" else "Bridge stopping",
+        serviceStopDetail = if (manualStop) {
+          "Bridge is stopping and will stay stopped until started again."
+        } else {
+          "Bridge is shutting down."
+        }
+      )
+    }
+  }
+
+  fun markServiceStopped(manualStop: Boolean = _state.value.manualStopActive) {
+    Timber.i("Service stopped (manual_stop=%s)", manualStop)
+    _state.update {
+      it.copy(
+        serviceRunning = false,
+        serviceStopping = false,
+        manualStopActive = manualStop,
+        serviceStopSummary = if (manualStop) "Stopped manually" else "Bridge stopped",
+        serviceStopDetail = if (manualStop) {
+          "Auto start is paused until you start the bridge again."
+        } else {
+          null
+        }
+      )
+    }
   }
 
   fun setListenerState(active: Boolean, port: Int) {

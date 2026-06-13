@@ -43,6 +43,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jerry155756294.powerampbridge.bridge.BridgeService
 import com.jerry155756294.powerampbridge.bridge.BridgeUiState
 import com.jerry155756294.powerampbridge.bridge.LogEntry
+import com.jerry155756294.powerampbridge.bridge.serviceStatusLabel
+import com.jerry155756294.powerampbridge.bridge.shouldAutoStart
 import com.jerry155756294.powerampbridge.data.BridgeSettings
 import com.jerry155756294.powerampbridge.data.BridgeSettingsRepository
 import com.jerry155756294.powerampbridge.ui.BridgeTheme
@@ -86,8 +88,8 @@ private fun BridgeApp(
   val settings by settingsRepository.settings.collectAsStateWithLifecycle(initialValue = BridgeSettings())
   var selectedTab by remember { mutableIntStateOf(0) }
 
-  LaunchedEffect(settings.autoStart, uiState.serviceRunning) {
-    if (settings.autoStart && !uiState.serviceRunning) {
+  LaunchedEffect(settings.autoStart, uiState.serviceRunning, uiState.serviceStopping, uiState.manualStopActive) {
+    if (uiState.shouldAutoStart(settings.autoStart)) {
       onStart()
     }
   }
@@ -192,6 +194,13 @@ private fun SettingsTab(
       Button(onClick = onStart) { Text("Start Bridge") }
       Button(onClick = onStop) { Text("Stop Bridge") }
     }
+
+    uiState.serviceStopSummary?.let { summary ->
+      SectionCard("Stop State") {
+        StatusLine("Status", summary)
+        StatusLine("Behavior", uiState.serviceStopDetail ?: "No extra detail.")
+      }
+    }
   }
 }
 
@@ -205,7 +214,7 @@ private fun StatusTab(uiState: BridgeUiState, advancedMode: Boolean) {
     verticalArrangement = Arrangement.spacedBy(12.dp)
   ) {
     SectionCard("Bridge") {
-      StatusLine("Service", if (uiState.serviceRunning) "Running" else "Stopped")
+      StatusLine("Service", uiState.serviceStatusLabel())
       StatusLine("Listener", if (uiState.listenerActive) "TCP ${uiState.listenPort}" else "Offline")
       StatusLine("Primary IP", uiState.localAddresses.firstOrNull() ?: "Unavailable")
       StatusLine("Client IP", uiState.activeClient ?: "None")
@@ -215,6 +224,8 @@ private fun StatusTab(uiState: BridgeUiState, advancedMode: Boolean) {
       StatusLine("Request Sockets", uiState.activeRequestSocketCount.toString())
       StatusLine("Position Sync", if (uiState.positionSyncActive) "Active" else "Idle")
       StatusLine("Last Verifyconnection", uiState.lastProbeAt ?: "None yet")
+      StatusLine("Stop Summary", uiState.serviceStopSummary ?: "None")
+      StatusLine("Stop Detail", uiState.serviceStopDetail ?: "None")
       StatusLine("Last Rejection", uiState.lastRejectedReason ?: "None yet")
       StatusLine(
         "Last Disconnect",

@@ -75,6 +75,10 @@ data class LatencySummary(
 
 data class BridgeUiState(
   val serviceRunning: Boolean = false,
+  val serviceStopping: Boolean = false,
+  val manualStopActive: Boolean = false,
+  val serviceStopSummary: String? = null,
+  val serviceStopDetail: String? = null,
   val listenerActive: Boolean = false,
   val listenPort: Int = 3000,
   val localAddresses: List<String> = emptyList(),
@@ -103,6 +107,16 @@ data class BridgeUiState(
   val recentPowerampEvents: List<LogEntry> = emptyList(),
   val lastError: String? = null
 )
+
+internal fun BridgeUiState.shouldAutoStart(autoStartEnabled: Boolean): Boolean =
+  autoStartEnabled && !serviceRunning && !serviceStopping && !manualStopActive
+
+internal fun BridgeUiState.serviceStatusLabel(): String = when {
+  serviceStopping -> "Stopping"
+  serviceRunning -> "Running"
+  manualStopActive -> "Stopped manually"
+  else -> "Stopped"
+}
 
 internal fun BridgeUiState.withSession(snapshot: LogicalClientSnapshot?): BridgeUiState =
   copy(
