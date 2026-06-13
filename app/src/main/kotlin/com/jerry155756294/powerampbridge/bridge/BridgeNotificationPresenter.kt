@@ -9,6 +9,8 @@ import com.jerry155756294.powerampbridge.R
 internal data class NotificationTextResources(
   val bridgeTitle: String,
   val bridgeStoppedTitle: String,
+  val bridgeMinimalSummary: String,
+  val bridgeMinimalSubtext: String,
   val notificationNoTrack: String,
   val stopLabel: String,
   val restartLabel: String
@@ -37,6 +39,8 @@ internal class BridgeNotificationPresenter(
     textResources = NotificationTextResources(
       bridgeTitle = context.getString(R.string.bridge_notification_title),
       bridgeStoppedTitle = context.getString(R.string.bridge_notification_stopped),
+      bridgeMinimalSummary = context.getString(R.string.notification_minimal_summary),
+      bridgeMinimalSubtext = context.getString(R.string.notification_minimal_subtext),
       notificationNoTrack = context.getString(R.string.notification_no_track),
       stopLabel = context.getString(R.string.notification_stop),
       restartLabel = context.getString(R.string.notification_restart)
@@ -48,6 +52,7 @@ internal class BridgeNotificationPresenter(
   )
 
   var foregroundPersistent: Boolean = true
+  var minimalMode: Boolean = false
 
   fun snapshot(state: BridgeUiState): NotificationSnapshot =
     NotificationSnapshot(
@@ -57,12 +62,17 @@ internal class BridgeNotificationPresenter(
         state.listenerActive -> textResources.bridgeTitle
         else -> textResources.bridgeStoppedTitle
       },
-      summary = if (state.playback.track.title.isNotBlank()) {
+      summary = if (minimalMode) {
+        textResources.bridgeMinimalSummary
+      } else if (state.playback.track.title.isNotBlank()) {
         "${state.playback.track.title} - ${state.playback.track.artist}"
       } else {
         textResources.notificationNoTrack
       },
-      subText = state.serviceStopSummary ?: buildList {
+      subText = if (minimalMode) {
+        state.serviceStopSummary ?: textResources.bridgeMinimalSubtext
+      } else {
+        state.serviceStopSummary ?: buildList {
         add("Port ${state.listenPort}")
         state.activeClient?.let { add("Client $it") }
         state.clientId?.let { add("ID $it") }
@@ -76,7 +86,8 @@ internal class BridgeNotificationPresenter(
         if (state.requestSocketConnected) {
           add("Request ${state.activeRequestSocketCount}")
         }
-      }.joinToString(" | "),
+      }.joinToString(" | ")
+      },
       ongoing = foregroundPersistent
     )
 

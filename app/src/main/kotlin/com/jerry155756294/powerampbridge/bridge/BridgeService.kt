@@ -174,6 +174,7 @@ class BridgeService : Service() {
     createNotificationChannel()
     stateRepository.markServiceStarted()
     notificationPresenter.foregroundPersistent = activeSettings.foregroundPersistent
+    notificationPresenter.minimalMode = activeSettings.minimalForegroundNotification
     val initialState = stateRepository.state.value
     lastNotificationSnapshot = notificationPresenter.snapshot(initialState)
     startForeground(NOTIFICATION_ID, notificationPresenter.build(initialState))
@@ -210,6 +211,7 @@ class BridgeService : Service() {
       app.appContainer.settingsRepository.settings.collectLatest { settings ->
         activeSettings = settings
         notificationPresenter.foregroundPersistent = settings.foregroundPersistent
+        notificationPresenter.minimalMode = settings.minimalForegroundNotification
         lastObservedState?.let { state ->
           val notificationSnapshot = notificationPresenter.snapshot(state)
           if (notificationSnapshot != lastNotificationSnapshot) {

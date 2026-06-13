@@ -5,5 +5,6 @@ data class BridgeSettings(
   val autoStart: Boolean = false,
   val startOnBoot: Boolean = false,
   val foregroundPersistent: Boolean = true,
+  val minimalForegroundNotification: Boolean = false,
   val advancedDiagnosticsEnabled: Boolean = false
 )

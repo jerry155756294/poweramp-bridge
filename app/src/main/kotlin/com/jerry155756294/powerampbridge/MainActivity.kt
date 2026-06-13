@@ -177,6 +177,9 @@ private fun SettingsTab(
       SettingSwitch("Persistent foreground notification", settings.foregroundPersistent) {
         scope.launch { repository.updateForegroundPersistent(it) }
       }
+      SettingSwitch("Minimal notification debug mode", settings.minimalForegroundNotification) {
+        scope.launch { repository.updateMinimalForegroundNotification(it) }
+      }
       SettingSwitch("Professional diagnostics mode", settings.advancedDiagnosticsEnabled) {
         scope.launch { repository.updateAdvancedDiagnostics(it) }
       }
@@ -188,6 +191,12 @@ private fun SettingsTab(
         },
         style = MaterialTheme.typography.bodySmall
       )
+      if (settings.minimalForegroundNotification) {
+        Text(
+          text = "Foreground notification debug mode keeps the bridge notification mostly static to test System UI pause interactions.",
+          style = MaterialTheme.typography.bodySmall
+        )
+      }
     }
 
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
