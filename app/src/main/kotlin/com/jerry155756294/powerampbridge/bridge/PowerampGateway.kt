@@ -674,8 +674,8 @@ class PowerampGateway(
 
   private companion object {
     const val NEGATIVE_COVER_CACHE_MS = 30_000L
-    const val MAX_COVER_DIMENSION = 512
-    const val COVER_JPEG_QUALITY = 85
+    const val MAX_COVER_DIMENSION = 1024
+    const val COVER_JPEG_QUALITY = 95
   }
 }
 
