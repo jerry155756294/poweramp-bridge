@@ -203,6 +203,19 @@ class BridgeStateRepository {
     }
   }
 
+  fun updateCoverState(coverState: CoverSnapshot) {
+    _state.update { current ->
+      if (current.coverState == coverState) {
+        current
+      } else {
+        current.copy(
+          coverState = coverState,
+          coverSignalRevision = current.coverSignalRevision + 1L
+        )
+      }
+    }
+  }
+
   fun signalCoverChanged(reason: String) {
     Timber.d("Cover signal: %s", reason)
     _state.update { current ->

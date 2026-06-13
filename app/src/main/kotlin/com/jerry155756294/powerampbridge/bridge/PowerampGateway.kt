@@ -30,9 +30,8 @@ class PowerampGateway(
     context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
   private var registered = false
-  private var cachedCover: CachedCover? = null
   private var coverLoadJob: Job? = null
-  private var loadingCoverRealId: Long? = null
+  private var coverLoadGeneration: Long = 0L
   private val coverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
   private val receiver = object : BroadcastReceiver() {
@@ -90,7 +89,6 @@ class PowerampGateway(
     runCatching { context.unregisterReceiver(receiver) }
     registered = false
     coverLoadJob?.cancel()
-    loadingCoverRealId = null
   }
 
   fun refreshAvailability(): Boolean {
@@ -113,31 +111,33 @@ class PowerampGateway(
   override fun currentCoverStatus(): Int {
     val realId = stateRepository.state.value.playback.track.realId
     if (realId <= 0L) {
-      return NOT_FOUND_COVER_STATUS
-    }
-    cachedCover?.takeIf { it.realId == realId && it.base64 != null }?.let {
-      return READY_COVER_STATUS
+      transitionCoverState(
+        CoverSnapshot(status = CoverStateStatus.MISSING),
+        "Cover state: missing track=none reason=no_active_track"
+      )
+      return stateRepository.state.value.coverState.statusOnlyCode()
     }
     ensureCoverLoading(realId)
-    return NOT_FOUND_COVER_STATUS
+    return stateRepository.state.value.coverState.statusOnlyCode()
   }
 
   override fun currentCoverPayload(): Map<String, Any?> {
     val realId = stateRepository.state.value.playback.track.realId
     if (realId <= 0L) {
-      stateRepository.recordPowerampEvent("Cover reply: missing track")
-      return mapOf("status" to NOT_FOUND_COVER_STATUS, "cover" to null)
+      transitionCoverState(
+        CoverSnapshot(status = CoverStateStatus.MISSING),
+        "Cover state: missing track=none reason=no_active_track"
+      )
+      stateRepository.recordPowerampEvent("Cover reply: missing track=none")
+      return stateRepository.state.value.coverState.payload()
     }
 
-    val cover = cachedCover?.takeIf { it.realId == realId }?.base64
-    return if (cover != null) {
-      stateRepository.recordPowerampEvent("Cover reply: cached")
-      mapOf("status" to SUCCESS_COVER_STATUS, "cover" to cover)
-    } else {
-      ensureCoverLoading(realId)
-      stateRepository.recordPowerampEvent("Cover reply: pending")
-      mapOf("status" to NOT_FOUND_COVER_STATUS, "cover" to null)
-    }
+    ensureCoverLoading(realId)
+    val coverState = stateRepository.state.value.coverState
+    stateRepository.recordPowerampEvent(
+      "Cover reply: ${coverState.summary()} track=${realId}"
+    )
+    return coverState.payload()
   }
 
   override fun playPause(): Boolean = sendCommand(PowerampAPI.Commands.TOGGLE_PLAY_PAUSE)
@@ -234,7 +234,6 @@ class PowerampGateway(
     val positionSec = PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.Track.POSITION) ?: -1
     val durationMs = PowerampBroadcastDiagnostics.extractDurationMs(track)
     val realId = PowerampBroadcastDiagnostics.readLong(track, PowerampAPI.Track.REAL_ID) ?: 0L
-    invalidateCoverCacheIfNeeded(realId)
     stateRepository.updatePlayback { playback ->
       playback.copy(
         track = playback.track.copy(
@@ -260,6 +259,7 @@ class PowerampGateway(
         )
       )
     }
+    resetCoverStateForTrack(realId)
     requestPositionSync()
     stateRepository.recordPowerampEvent(
       "Track changed ($actionLabel): ${track.getString(PowerampAPI.Track.TITLE).orEmpty()}"
@@ -353,54 +353,126 @@ class PowerampGateway(
   }
 
   private fun invalidateCoverCacheIfNeeded(realId: Long) {
-    if (cachedCover?.realId != realId) {
-      cachedCover = null
-    }
-    if (loadingCoverRealId != realId) {
+    if (stateRepository.state.value.coverState.realId != realId) {
       coverLoadJob?.cancel()
-      loadingCoverRealId = null
+      coverLoadGeneration += 1L
     }
   }
 
   private fun invalidateCoverCache() {
-    cachedCover = null
     coverLoadJob?.cancel()
-    loadingCoverRealId = null
+    coverLoadGeneration += 1L
+    transitionCoverState(CoverSnapshot(status = CoverStateStatus.MISSING))
   }
 
   private fun ensureCoverLoading(realId: Long) {
     if (realId <= 0L) return
-    if (cachedCover?.realId == realId && cachedCover?.base64 != null) return
-    if (loadingCoverRealId == realId && coverLoadJob?.isActive == true) return
+    val current = stateRepository.state.value.coverState
+    if (current.realId == realId &&
+      current.status == CoverStateStatus.READY &&
+      !current.base64.isNullOrEmpty()
+    ) {
+      return
+    }
+    if (current.realId == realId &&
+      current.status == CoverStateStatus.LOADING &&
+      coverLoadJob?.isActive == true
+    ) {
+      return
+    }
 
     coverLoadJob?.cancel()
-    loadingCoverRealId = realId
+    coverLoadGeneration += 1L
+    val generation = coverLoadGeneration
+    transitionCoverState(
+      CoverSnapshot(realId = realId, status = CoverStateStatus.LOADING),
+      "Cover state: loading track=$realId"
+    )
     coverLoadJob = coverScope.launch {
       val startedAt = SystemClock.elapsedRealtime()
-      val base64 = loadCoverBase64(realId)
+      val result = loadCoverResult(realId)
       val elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
-      cachedCover = CachedCover(realId = realId, base64 = base64)
-      loadingCoverRealId = null
-      stateRepository.recordPowerampEvent(
-        "Cover load ${if (base64 != null) "cached" else "missing"}: ${elapsedMs}ms"
-      )
-      stateRepository.signalCoverChanged("cover_load_finished:$realId")
+      if (generation != coverLoadGeneration ||
+        stateRepository.state.value.playback.track.realId != realId
+      ) {
+        return@launch
+      }
+
+      val nextState = when (result) {
+        is CoverLoadResult.Ready -> CoverSnapshot(
+          realId = realId,
+          status = CoverStateStatus.READY,
+          base64 = result.base64,
+          elapsedMs = elapsedMs
+        )
+        CoverLoadResult.Missing -> CoverSnapshot(
+          realId = realId,
+          status = CoverStateStatus.MISSING,
+          elapsedMs = elapsedMs
+        )
+        is CoverLoadResult.Error -> CoverSnapshot(
+          realId = realId,
+          status = CoverStateStatus.ERROR,
+          elapsedMs = elapsedMs,
+          errorMessage = result.message
+        )
+      }
+
+      val event = when (result) {
+        is CoverLoadResult.Ready -> "Cover state: ready track=$realId elapsed=${elapsedMs}ms"
+        CoverLoadResult.Missing -> "Cover state: missing track=$realId elapsed=${elapsedMs}ms"
+        is CoverLoadResult.Error ->
+          "Cover state: error track=$realId elapsed=${elapsedMs}ms error=${result.message}"
+      }
+      transitionCoverState(nextState, event)
     }
   }
 
-  private fun loadCoverBase64(realId: Long): String? {
+  private fun loadCoverResult(realId: Long): CoverLoadResult {
     val uri = PowerampAPI.AA_ROOT_URI.buildUpon()
       .appendEncodedPath("files")
       .appendEncodedPath(realId.toString())
       .build()
     return runCatching { loadScaledCoverBase64(uri.toString()) }
+      .map { base64 ->
+        if (base64.isNullOrEmpty()) {
+          CoverLoadResult.Missing
+        } else {
+          CoverLoadResult.Ready(base64)
+        }
+      }
       .onFailure { error ->
         Timber.w(error, "Failed to load cover for track %s", realId)
-        stateRepository.recordPowerampEvent(
-          "Cover load error: ${error.javaClass.simpleName}: ${error.message ?: "no-message"}"
-        )
       }
-      .getOrNull()
+      .getOrElse { error ->
+        CoverLoadResult.Error("${error.javaClass.simpleName}:${error.message ?: "no-message"}")
+      }
+  }
+
+  private fun resetCoverStateForTrack(realId: Long) {
+    invalidateCoverCacheIfNeeded(realId)
+    if (realId <= 0L) {
+      transitionCoverState(
+        CoverSnapshot(status = CoverStateStatus.MISSING),
+        "Cover state: missing track=none reason=no_active_track"
+      )
+      return
+    }
+
+    transitionCoverState(
+      CoverSnapshot(realId = realId, status = CoverStateStatus.LOADING),
+      "Cover state: loading track=$realId trigger=track_changed"
+    )
+    ensureCoverLoading(realId)
+  }
+
+  private fun transitionCoverState(next: CoverSnapshot, event: String? = null) {
+    val current = stateRepository.state.value.coverState
+    if (current == next) {
+      return
+    }
+    event?.let(stateRepository::recordPowerampEvent)
+    stateRepository.updateCoverState(next)
   }
 
   private fun loadScaledCoverBase64(uri: String): String? {
@@ -458,15 +530,13 @@ class PowerampGateway(
     return sampleSize.coerceAtLeast(1)
   }
 
-  private data class CachedCover(
-    val realId: Long,
-    val base64: String?
-  )
+  private sealed interface CoverLoadResult {
+    data class Ready(val base64: String) : CoverLoadResult
+    data object Missing : CoverLoadResult
+    data class Error(val message: String) : CoverLoadResult
+  }
 
   private companion object {
-    const val READY_COVER_STATUS = 1
-    const val SUCCESS_COVER_STATUS = 200
-    const val NOT_FOUND_COVER_STATUS = 404
     const val MAX_COVER_DIMENSION = 512
     const val COVER_JPEG_QUALITY = 85
   }

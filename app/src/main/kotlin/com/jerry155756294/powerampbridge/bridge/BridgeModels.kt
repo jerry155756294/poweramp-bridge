@@ -73,6 +73,39 @@ data class LatencySummary(
   val totalMs: Long = 0L
 )
 
+enum class CoverStateStatus {
+  LOADING,
+  READY,
+  MISSING,
+  ERROR
+}
+
+data class CoverSnapshot(
+  val realId: Long = 0L,
+  val status: CoverStateStatus = CoverStateStatus.MISSING,
+  val base64: String? = null,
+  val elapsedMs: Long? = null,
+  val errorMessage: String? = null
+) {
+  fun statusOnlyCode(): Int =
+    if (status == CoverStateStatus.READY && !base64.isNullOrEmpty()) 1 else 404
+
+  fun payload(): Map<String, Any?> =
+    if (status == CoverStateStatus.READY && !base64.isNullOrEmpty()) {
+      mapOf("status" to 200, "cover" to base64)
+    } else {
+      mapOf("status" to 404, "cover" to null)
+    }
+
+  fun summary(): String = status.name.lowercase()
+
+  fun detail(): String = buildList {
+    add("track=${realId.takeIf { it > 0L } ?: "none"}")
+    elapsedMs?.let { add("elapsed=${it}ms") }
+    errorMessage?.takeIf { it.isNotBlank() }?.let { add("error=$it") }
+  }.joinToString(" | ")
+}
+
 data class BridgeUiState(
   val serviceRunning: Boolean = false,
   val serviceStopping: Boolean = false,
@@ -100,6 +133,7 @@ data class BridgeUiState(
   val lastDisconnectLastReply: String? = null,
   val latencySummary: LatencySummary = LatencySummary(),
   val positionSyncActive: Boolean = false,
+  val coverState: CoverSnapshot = CoverSnapshot(),
   val coverSignalRevision: Long = 0L,
   val playback: PlaybackSnapshot = PlaybackSnapshot(),
   val recentCommands: List<LogEntry> = emptyList(),

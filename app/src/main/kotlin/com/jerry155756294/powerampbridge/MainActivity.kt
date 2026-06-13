@@ -250,6 +250,8 @@ private fun StatusTab(uiState: BridgeUiState, advancedMode: Boolean) {
       StatusLine("Playback State", uiState.playback.state)
       StatusLine("Repeat / Shuffle", "${uiState.playback.repeat} / ${uiState.playback.shuffle}")
       StatusLine("Volume", "${uiState.playback.volume}%")
+      StatusLine("Cover State", uiState.coverState.summary())
+      StatusLine("Cover Detail", uiState.coverState.detail())
     }
 
     SectionCard("Now Playing") {

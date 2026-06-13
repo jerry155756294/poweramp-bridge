@@ -31,12 +31,24 @@ class MbrcProtocolAdapterTest {
   @Test
   fun `cached nowplayingcover payload is returned unchanged`() {
     controller.coverPayload = mapOf("status" to 200, "cover" to "abc")
+    controller.coverStatus = 1
 
     val reply = adapter.handleCommand(IncomingMessage(ProtocolConstants.NowPlayingCover, null)).single()
     val data = JSONObject(reply).getJSONObject("data")
 
     assertEquals(200, data.getInt("status"))
     assertEquals("abc", data.getString("cover"))
+  }
+
+  @Test
+  fun `cover status message keeps sender compatible status only payload`() {
+    controller.coverStatus = 1
+
+    val reply = adapter.coverStatusMessage()
+    val data = JSONObject(reply).getJSONObject("data")
+
+    assertEquals(1, data.getInt("status"))
+    assertTrue(data.isNull("cover"))
   }
 
   @Test
@@ -88,10 +100,11 @@ class MbrcProtocolAdapterTest {
   }
 
   private class FakePowerampController : PowerampController {
+    var coverStatus: Int = 404
     var coverPayload: Map<String, Any?> = mapOf("status" to 404, "cover" to null)
     var coverPayloadCalls = 0
 
-    override fun currentCoverStatus(): Int = 404
+    override fun currentCoverStatus(): Int = coverStatus
     override fun currentCoverPayload(): Map<String, Any?> {
       coverPayloadCalls += 1
       return coverPayload

@@ -101,4 +101,42 @@ class BridgeStateRepositoryTest {
 
     assertEquals(2L, repository.state.value.coverSignalRevision)
   }
+
+  @Test
+  fun `cover state transitions update summary and sender signal`() {
+    repository.updateCoverState(
+      CoverSnapshot(
+        realId = 42L,
+        status = CoverStateStatus.LOADING
+      )
+    )
+    repository.updateCoverState(
+      CoverSnapshot(
+        realId = 42L,
+        status = CoverStateStatus.READY,
+        base64 = "abc",
+        elapsedMs = 33L
+      )
+    )
+
+    val state = repository.state.value
+    assertEquals(CoverStateStatus.READY, state.coverState.status)
+    assertEquals("ready", state.coverState.summary())
+    assertEquals("track=42 | elapsed=33ms", state.coverState.detail())
+    assertEquals(2L, state.coverSignalRevision)
+  }
+
+  @Test
+  fun `same cover state does not emit duplicate sender signal`() {
+    val coverState = CoverSnapshot(
+      realId = 7L,
+      status = CoverStateStatus.MISSING,
+      elapsedMs = 15L
+    )
+
+    repository.updateCoverState(coverState)
+    repository.updateCoverState(coverState)
+
+    assertEquals(1L, repository.state.value.coverSignalRevision)
+  }
 }
