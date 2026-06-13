@@ -85,6 +85,11 @@ data class CoverSnapshot(
   val status: CoverStateStatus = CoverStateStatus.MISSING,
   val base64: String? = null,
   val elapsedMs: Long? = null,
+  val detailReason: String? = null,
+  val detailUri: String? = null,
+  val detailWidth: Int? = null,
+  val detailHeight: Int? = null,
+  val detailMime: String? = null,
   val errorMessage: String? = null
 ) {
   fun statusOnlyCode(): Int =
@@ -102,6 +107,12 @@ data class CoverSnapshot(
   fun detail(): String = buildList {
     add("track=${realId.takeIf { it > 0L } ?: "none"}")
     elapsedMs?.let { add("elapsed=${it}ms") }
+    detailReason?.takeIf { it.isNotBlank() }?.let { add("reason=$it") }
+    if (detailWidth != null || detailHeight != null) {
+      add("bounds=${detailWidth ?: "?"}x${detailHeight ?: "?"}")
+    }
+    detailMime?.takeIf { it.isNotBlank() }?.let { add("mime=$it") }
+    detailUri?.takeIf { it.isNotBlank() }?.let { add("uri=$it") }
     errorMessage?.takeIf { it.isNotBlank() }?.let { add("error=$it") }
   }.joinToString(" | ")
 }

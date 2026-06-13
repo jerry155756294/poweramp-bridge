@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioManager
+import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Base64
@@ -15,6 +16,7 @@ import com.maxmpz.poweramp.player.PowerampAPI
 import com.maxmpz.poweramp.player.PowerampAPIHelper
 import java.io.ByteArrayOutputStream
 import kotlin.math.ceil
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,6 +34,7 @@ class PowerampGateway(
   private var registered = false
   private var coverLoadJob: Job? = null
   private var coverLoadGeneration: Long = 0L
+  private val negativeCoverCache = ConcurrentHashMap<Long, NegativeCoverCacheEntry>()
   private val coverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
   private val receiver = object : BroadcastReceiver() {
@@ -357,11 +360,16 @@ class PowerampGateway(
       coverLoadJob?.cancel()
       coverLoadGeneration += 1L
     }
+    val activeTrackId = stateRepository.state.value.coverState.realId
+    if (activeTrackId > 0L && activeTrackId != realId) {
+      negativeCoverCache.remove(activeTrackId)
+    }
   }
 
   private fun invalidateCoverCache() {
     coverLoadJob?.cancel()
     coverLoadGeneration += 1L
+    negativeCoverCache.clear()
     transitionCoverState(CoverSnapshot(status = CoverStateStatus.MISSING))
   }
 
@@ -371,6 +379,18 @@ class PowerampGateway(
     if (current.realId == realId &&
       current.status == CoverStateStatus.READY &&
       !current.base64.isNullOrEmpty()
+    ) {
+      return
+    }
+    if (current.realId == realId &&
+      current.status == CoverStateStatus.MISSING
+    ) {
+      negativeCoverCache[realId]?.takeIf { it.expiresAtMs > SystemClock.elapsedRealtime() }?.let {
+        return
+      }
+    }
+    if (current.realId == realId &&
+      current.status == CoverStateStatus.ERROR
     ) {
       return
     }
@@ -405,22 +425,29 @@ class PowerampGateway(
           base64 = result.base64,
           elapsedMs = elapsedMs
         )
-        CoverLoadResult.Missing -> CoverSnapshot(
+        is CoverLoadResult.Missing -> CoverSnapshot(
           realId = realId,
           status = CoverStateStatus.MISSING,
-          elapsedMs = elapsedMs
+          elapsedMs = elapsedMs,
+          detailReason = result.reason.name.lowercase(),
+          detailUri = result.uri.toString(),
+          detailWidth = result.width,
+          detailHeight = result.height,
+          detailMime = result.mime
         )
         is CoverLoadResult.Error -> CoverSnapshot(
           realId = realId,
           status = CoverStateStatus.ERROR,
           elapsedMs = elapsedMs,
+          detailUri = result.uri.toString(),
           errorMessage = result.message
         )
       }
 
       val event = when (result) {
         is CoverLoadResult.Ready -> "Cover state: ready track=$realId elapsed=${elapsedMs}ms"
-        CoverLoadResult.Missing -> "Cover state: missing track=$realId elapsed=${elapsedMs}ms"
+        is CoverLoadResult.Missing ->
+          "Cover state: missing track=$realId reason=${result.reason.name.lowercase()} uri=${result.uri} elapsed=${elapsedMs}ms bounds=${result.width ?: "?"}x${result.height ?: "?"} mime=${result.mime ?: "unknown"}"
         is CoverLoadResult.Error ->
           "Cover state: error track=$realId elapsed=${elapsedMs}ms error=${result.message}"
       }
@@ -429,24 +456,43 @@ class PowerampGateway(
   }
 
   private fun loadCoverResult(realId: Long): CoverLoadResult {
+    val now = SystemClock.elapsedRealtime()
+    negativeCoverCache[realId]?.let { cached ->
+      if (cached.expiresAtMs > now) {
+        stateRepository.recordPowerampEvent(
+          "Cover state: missing_cached track=$realId reason=${cached.reason.name.lowercase()} uri=${cached.uri}"
+        )
+        return CoverLoadResult.Missing(
+          reason = cached.reason,
+          uri = cached.uri,
+          width = cached.width,
+          height = cached.height,
+          mime = cached.mime
+        )
+      }
+      negativeCoverCache.remove(realId)
+    }
+
     val uri = PowerampAPI.AA_ROOT_URI.buildUpon()
       .appendEncodedPath("files")
       .appendEncodedPath(realId.toString())
       .build()
-    return runCatching { loadScaledCoverBase64(uri.toString()) }
-      .map { base64 ->
-        if (base64.isNullOrEmpty()) {
-          CoverLoadResult.Missing
-        } else {
-          CoverLoadResult.Ready(base64)
-        }
+    val result = loadScaledCoverBase64Detailed(uri)
+    when (result) {
+      is CoverLoadResult.Ready -> negativeCoverCache.remove(realId)
+      is CoverLoadResult.Missing -> {
+        negativeCoverCache[realId] = NegativeCoverCacheEntry(
+          reason = result.reason,
+          uri = result.uri,
+          expiresAtMs = now + NEGATIVE_COVER_CACHE_MS,
+          width = result.width,
+          height = result.height,
+          mime = result.mime
+        )
       }
-      .onFailure { error ->
-        Timber.w(error, "Failed to load cover for track %s", realId)
-      }
-      .getOrElse { error ->
-        CoverLoadResult.Error("${error.javaClass.simpleName}:${error.message ?: "no-message"}")
-      }
+      is CoverLoadResult.Error -> negativeCoverCache.remove(realId)
+    }
+    return result
   }
 
   private fun resetCoverStateForTrack(realId: Long) {
@@ -475,19 +521,70 @@ class PowerampGateway(
     stateRepository.updateCoverState(next)
   }
 
-  private fun loadScaledCoverBase64(uri: String): String? {
-    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    context.contentResolver.openFileDescriptor(android.net.Uri.parse(uri), "r")?.use { descriptor ->
-      BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, options)
-    } ?: return null
+  private fun loadScaledCoverBase64Detailed(uri: Uri): CoverLoadResult {
+    val startedAt = SystemClock.elapsedRealtime()
+    return runCatching {
+      val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      val fdForBounds = context.contentResolver.openFileDescriptor(uri, "r")
+        ?: return CoverLoadResult.Missing(
+          reason = CoverMissingReason.FD_NULL,
+          uri = uri
+        )
 
-    val sampleSize = calculateSampleSize(options.outWidth, options.outHeight, MAX_COVER_DIMENSION)
-    val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-    val bitmap = context.contentResolver.openFileDescriptor(android.net.Uri.parse(uri), "r")?.use { descriptor ->
-      BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, decodeOptions)
-    } ?: return null
+      fdForBounds.use { descriptor ->
+        BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, bounds)
+      }
 
-    return bitmap.useScaledBase64()
+      if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        return CoverLoadResult.Missing(
+          reason = CoverMissingReason.BOUNDS_INVALID,
+          uri = uri,
+          width = bounds.outWidth,
+          height = bounds.outHeight,
+          mime = bounds.outMimeType
+        )
+      }
+
+      val sampleSize = calculateSampleSize(bounds.outWidth, bounds.outHeight, MAX_COVER_DIMENSION)
+      val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+      val fdForBitmap = context.contentResolver.openFileDescriptor(uri, "r")
+        ?: return CoverLoadResult.Missing(
+          reason = CoverMissingReason.FD_NULL,
+          uri = uri,
+          width = bounds.outWidth,
+          height = bounds.outHeight,
+          mime = bounds.outMimeType
+        )
+
+      val bitmap = fdForBitmap.use { descriptor ->
+        BitmapFactory.decodeFileDescriptor(descriptor.fileDescriptor, null, decodeOptions)
+      } ?: return CoverLoadResult.Missing(
+        reason = CoverMissingReason.BITMAP_DECODE_NULL,
+        uri = uri,
+        width = bounds.outWidth,
+        height = bounds.outHeight,
+        mime = bounds.outMimeType
+      )
+
+      val base64 = bitmap.useScaledBase64()
+      if (base64.isBlank()) {
+        CoverLoadResult.Missing(
+          reason = CoverMissingReason.ENCODE_EMPTY,
+          uri = uri,
+          width = bounds.outWidth,
+          height = bounds.outHeight,
+          mime = bounds.outMimeType
+        )
+      } else {
+        CoverLoadResult.Ready(base64)
+      }
+    }.getOrElse { error ->
+      Timber.w(error, "Failed to load cover for uri %s", uri)
+      CoverLoadResult.Error(
+        uri = uri,
+        message = "${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.withElapsed((SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L))
   }
 
   private fun Bitmap.useScaledBase64(): String {
@@ -530,13 +627,53 @@ class PowerampGateway(
     return sampleSize.coerceAtLeast(1)
   }
 
-  private sealed interface CoverLoadResult {
-    data class Ready(val base64: String) : CoverLoadResult
-    data object Missing : CoverLoadResult
-    data class Error(val message: String) : CoverLoadResult
+  private enum class CoverMissingReason {
+    FD_NULL,
+    BOUNDS_INVALID,
+    BITMAP_DECODE_NULL,
+    ENCODE_EMPTY
   }
 
+  private data class NegativeCoverCacheEntry(
+    val reason: CoverMissingReason,
+    val uri: Uri,
+    val expiresAtMs: Long,
+    val width: Int? = null,
+    val height: Int? = null,
+    val mime: String? = null
+  )
+
+  private sealed interface CoverLoadResult {
+    data class Ready(
+      val base64: String,
+      val elapsedMs: Long = 0L
+    ) : CoverLoadResult
+
+    data class Missing(
+      val reason: CoverMissingReason,
+      val uri: Uri,
+      val elapsedMs: Long = 0L,
+      val width: Int? = null,
+      val height: Int? = null,
+      val mime: String? = null
+    ) : CoverLoadResult
+
+    data class Error(
+      val uri: Uri,
+      val message: String,
+      val elapsedMs: Long = 0L
+    ) : CoverLoadResult
+  }
+
+  private fun CoverLoadResult.withElapsed(elapsedMs: Long): CoverLoadResult =
+    when (this) {
+      is CoverLoadResult.Ready -> copy(elapsedMs = elapsedMs)
+      is CoverLoadResult.Missing -> copy(elapsedMs = elapsedMs)
+      is CoverLoadResult.Error -> copy(elapsedMs = elapsedMs)
+    }
+
   private companion object {
+    const val NEGATIVE_COVER_CACHE_MS = 30_000L
     const val MAX_COVER_DIMENSION = 512
     const val COVER_JPEG_QUALITY = 85
   }
