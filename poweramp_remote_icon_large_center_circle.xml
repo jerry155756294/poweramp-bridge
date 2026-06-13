@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- Background -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M12,2A10,10 0,1 1,2 12A10,10 0,0 1,12 2z" />
+
+    <!-- Remote body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M8.3,5.4h7.4a2,2 0,0 1,2 2v9.2a2,2 0,0 1,-2 2H8.3a2,2 0,0 1,-2 -2V7.4a2,2 0,0 1,2 -2z" />
+
+    <!-- IR / connection window -->
+    <path
+        android:fillColor="#2563EB"
+        android:fillAlpha="0.9"
+        android:pathData="M9.9,7h4.2a0.7,0.7 0,0 1,0 1.4H9.9a0.7,0.7 0,0 1,0 -1.4z" />
+
+    <!-- Enlarged center control circle -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#2563EB"
+        android:strokeWidth="1.35"
+        android:strokeLineCap="round"
+        android:pathData="M12,12.2m-3.05,0a3.05,3.05 0,1 0,6.1 0a3.05,3.05 0,1 0,-6.1 0" />
+
+    <!-- Play button, visually centered -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M11.2,10.45v3.5l3,-1.75z" />
+
+    <!-- Bottom control bar -->
+    <path
+        android:fillColor="#2563EB"
+        android:fillAlpha="0.75"
+        android:pathData="M9,16.25h6a0.6,0.6 0,0 1,0 1.2H9a0.6,0.6 0,0 1,0 -1.2z" />
+
+</vector>
