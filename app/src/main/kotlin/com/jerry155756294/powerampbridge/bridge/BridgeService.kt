@@ -123,12 +123,15 @@ class BridgeService : Service() {
           return emptyList()
         }
 
+        val nowMs = SystemClock.elapsedRealtime()
+        val senderProjection = observationPipeline.senderFacingState(stateRepository.state.value, nowMs)
+        senderProjection.protocolEvents.forEach(stateRepository::recordProtocolEvent)
         return adapter.snapshotMessages(
-          stateRepository.state.value,
+          senderProjection.state,
           includePosition = true,
           includeCover = true
         ).also {
-          val state = stateRepository.state.value
+          val state = senderProjection.state
           lastStatusBroadcastPayload = adapter.snapshotMessages(
             state,
             includePosition = false,
@@ -241,6 +244,7 @@ class BridgeService : Service() {
         observationResult.protocolEvents.forEach(app.appContainer.stateRepository::recordProtocolEvent)
         observationResult.powerampEvents.forEach(app.appContainer.stateRepository::recordPowerampEvent)
         if (observationResult.action == ObservationAction.REPLAY_PLAY) {
+          observationPipeline.onRecoveryPlayIssued(nowMs)
           launch(Dispatchers.IO) {
             powerampGateway.play()
           }
@@ -275,8 +279,11 @@ class BridgeService : Service() {
           return@collectLatest
         }
 
+        val senderProjection = observationPipeline.senderFacingState(state, nowMs)
+        senderProjection.protocolEvents.forEach(app.appContainer.stateRepository::recordProtocolEvent)
+        val senderState = senderProjection.state
         val statusPayload = adapter.snapshotMessages(
-          state,
+          senderState,
           includePosition = false,
           includeCover = false
         )
@@ -291,8 +298,8 @@ class BridgeService : Service() {
           if (statusPayload != lastStatusBroadcastPayload) {
             addAll(statusPayload)
           }
-          if (lastBroadcastPositionMs != state.playback.track.positionMs) {
-            add(adapter.positionMessage(state))
+          if (lastBroadcastPositionMs != senderState.playback.track.positionMs) {
+            add(adapter.positionMessage(senderState))
           }
           if (shouldSendCoverSignal) {
             add(adapter.coverStatusMessage())
@@ -301,10 +308,10 @@ class BridgeService : Service() {
 
         if (messages.isNotEmpty()) {
           lastStatusBroadcastPayload = statusPayload
-          lastBroadcastPositionMs = state.playback.track.positionMs
+          lastBroadcastPositionMs = senderState.playback.track.positionMs
           if (shouldSendCoverSignal) {
-            lastCoverSignalTrackId = state.playback.track.realId
-            lastCoverSignalRevision = state.coverSignalRevision
+            lastCoverSignalTrackId = senderState.playback.track.realId
+            lastCoverSignalRevision = senderState.coverSignalRevision
           }
           launch(Dispatchers.IO) {
             server.sendBroadcast(messages)

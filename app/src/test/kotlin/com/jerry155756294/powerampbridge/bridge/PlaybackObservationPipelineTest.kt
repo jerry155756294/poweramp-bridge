@@ -110,6 +110,77 @@ class PlaybackObservationPipelineTest {
     assertNull(result.action)
   }
 
+  @Test
+  fun `sender-facing paused state is held briefly after play`() {
+    pipeline.onCommandResult(
+      CommandPipelineResult(
+        replies = emptyList(),
+        intent = PlaybackCommandIntent.PLAY_PAUSE,
+        executed = true
+      ),
+      nowMs = 5_000L
+    )
+
+    val projection = pipeline.senderFacingState(
+      observed = pausedState(),
+      nowMs = 5_200L
+    )
+
+    assertEquals("playing", projection.state.playback.state)
+    assertTrue(projection.protocolEvents.contains("observation_pipeline:hold_sender_paused_state"))
+  }
+
+  @Test
+  fun `sender-facing paused state is released after hold window`() {
+    pipeline.onCommandResult(
+      CommandPipelineResult(
+        replies = emptyList(),
+        intent = PlaybackCommandIntent.PLAY,
+        executed = true
+      ),
+      nowMs = 6_000L
+    )
+
+    pipeline.senderFacingState(
+      observed = pausedState(),
+      nowMs = 6_200L
+    )
+    val projection = pipeline.senderFacingState(
+      observed = pausedState(),
+      nowMs = 7_300L
+    )
+
+    assertEquals("paused", projection.state.playback.state)
+    assertTrue(projection.protocolEvents.contains("observation_pipeline:release_sender_paused_state"))
+  }
+
+  @Test
+  fun `sender-facing paused state is not held after explicit sender pause`() {
+    pipeline.onCommandResult(
+      CommandPipelineResult(
+        replies = emptyList(),
+        intent = PlaybackCommandIntent.PLAY,
+        executed = true
+      ),
+      nowMs = 8_000L
+    )
+    pipeline.onCommandResult(
+      CommandPipelineResult(
+        replies = emptyList(),
+        intent = PlaybackCommandIntent.PAUSE,
+        executed = true
+      ),
+      nowMs = 8_100L
+    )
+
+    val projection = pipeline.senderFacingState(
+      observed = pausedState(),
+      nowMs = 8_200L
+    )
+
+    assertEquals("paused", projection.state.playback.state)
+  }
+
   private fun playingState(): BridgeUiState =
     BridgeUiState(playback = PlaybackSnapshot(state = "playing"))
 

@@ -4,6 +4,11 @@ internal enum class ObservationAction {
   REPLAY_PLAY
 }
 
+internal data class SenderStateProjection(
+  val state: BridgeUiState,
+  val protocolEvents: List<String> = emptyList()
+)
+
 internal data class ObservationResult(
   val action: ObservationAction? = null,
   val protocolEvents: List<String> = emptyList(),
@@ -11,10 +16,16 @@ internal data class ObservationResult(
 )
 
 internal class PlaybackObservationPipeline(
-  private val recoveryPolicy: UnexpectedPauseRecoveryPolicy = UnexpectedPauseRecoveryPolicy()
+  private val recoveryPolicy: UnexpectedPauseRecoveryPolicy = UnexpectedPauseRecoveryPolicy(),
+  private val senderStatePolicy: SenderStateStabilityPolicy = SenderStateStabilityPolicy()
 ) {
   fun onCommandResult(result: CommandPipelineResult, nowMs: Long) {
     recoveryPolicy.recordCommandResult(result, nowMs)
+    senderStatePolicy.recordCommandResult(result, nowMs)
+  }
+
+  fun onRecoveryPlayIssued(nowMs: Long) {
+    senderStatePolicy.recordRecoveryPlayIssued(nowMs)
   }
 
   fun onPlaybackObserved(
@@ -40,6 +51,11 @@ internal class PlaybackObservationPipeline(
     }
     return ObservationResult()
   }
+
+  fun senderFacingState(
+    observed: BridgeUiState,
+    nowMs: Long
+  ): SenderStateProjection = senderStatePolicy.project(observed, nowMs)
 }
 
 internal class UnexpectedPauseRecoveryPolicy(
@@ -100,4 +116,74 @@ internal class UnexpectedPauseRecoveryPolicy(
     }
     return shouldRecover
   }
+}
+
+internal class SenderStateStabilityPolicy(
+  private val stateHoldWindowMs: Long = 1_200L
+) {
+  private var lastBridgePlayCommandAtMs: Long? = null
+  private var lastSenderPauseAtMs: Long? = null
+  private var pauseHoldActive = false
+
+  fun recordCommandResult(result: CommandPipelineResult, nowMs: Long) {
+    when {
+      result.executed &&
+        (result.intent == PlaybackCommandIntent.PLAY || result.intent == PlaybackCommandIntent.PLAY_PAUSE) -> {
+        lastBridgePlayCommandAtMs = nowMs
+        pauseHoldActive = false
+      }
+      result.executed &&
+        (result.intent == PlaybackCommandIntent.PAUSE || result.intent == PlaybackCommandIntent.STOP) -> {
+        lastSenderPauseAtMs = nowMs
+        pauseHoldActive = false
+      }
+    }
+  }
+
+  fun recordRecoveryPlayIssued(nowMs: Long) {
+    lastBridgePlayCommandAtMs = nowMs
+    pauseHoldActive = false
+  }
+
+  fun project(observed: BridgeUiState, nowMs: Long): SenderStateProjection {
+    val shouldHoldPausedState =
+      observed.playback.state == "paused" &&
+        recentlySentPlay(nowMs) &&
+        !senderPausedRecently(nowMs)
+
+    if (!shouldHoldPausedState) {
+      if (pauseHoldActive) {
+        pauseHoldActive = false
+        return SenderStateProjection(
+          state = observed,
+          protocolEvents = listOf("observation_pipeline:release_sender_paused_state")
+        )
+      }
+      return SenderStateProjection(state = observed)
+    }
+
+    val protocolEvents = if (pauseHoldActive) {
+      emptyList()
+    } else {
+      pauseHoldActive = true
+      listOf("observation_pipeline:hold_sender_paused_state")
+    }
+
+    return SenderStateProjection(
+      state = observed.copy(
+        playback = observed.playback.copy(state = "playing")
+      ),
+      protocolEvents = protocolEvents
+    )
+  }
+
+  private fun recentlySentPlay(nowMs: Long): Boolean =
+    lastBridgePlayCommandAtMs
+      ?.let { nowMs - it in 0..stateHoldWindowMs }
+      ?: false
+
+  private fun senderPausedRecently(nowMs: Long): Boolean =
+    lastSenderPauseAtMs
+      ?.let { nowMs - it in 0..stateHoldWindowMs }
+      ?: false
 }
