@@ -1,6 +1,5 @@
 package com.jerry155756294.powerampbridge.bridge
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -10,9 +9,8 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
-import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.jerry155756294.powerampbridge.BridgeApplication
 import com.jerry155756294.powerampbridge.MainActivity
 import com.jerry155756294.powerampbridge.R
@@ -58,6 +56,10 @@ class BridgeService : Service() {
   private var stopJob: Job? = null
   private var manualStopRequested = false
   private var stopCompleted = false
+  private var lastNotificationSnapshot: NotificationSnapshot? = null
+  private lateinit var notificationPresenter: BridgeNotificationPresenter
+  private lateinit var commandPipeline: PlaybackCommandPipeline
+  private lateinit var observationPipeline: PlaybackObservationPipeline
 
   override fun onCreate() {
     super.onCreate()
@@ -69,6 +71,29 @@ class BridgeService : Service() {
       stateRepository = stateRepository,
       powerampGateway = powerampGateway
     )
+    commandPipeline = PlaybackCommandPipeline(adapter)
+    observationPipeline = PlaybackObservationPipeline()
+    notificationPresenter = BridgeNotificationPresenter(
+      context = this,
+      launchIntent = PendingIntent.getActivity(
+        this,
+        1,
+        Intent(this, MainActivity::class.java),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+      ),
+      stopIntent = PendingIntent.getService(
+        this,
+        2,
+        Intent(this, BridgeService::class.java).setAction(ACTION_STOP),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+      ),
+      restartIntent = PendingIntent.getService(
+        this,
+        3,
+        Intent(this, BridgeService::class.java).setAction(ACTION_RESTART),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+      )
+    )
     server = MbrcProtocolServer(codec, object : MbrcProtocolServer.Listener {
       override suspend fun onCommand(
         clientInfo: ProtocolClientInfo,
@@ -78,11 +103,18 @@ class BridgeService : Service() {
           stateRepository.recordProtocolEvent("service_stopping_rejected:${message.context}")
           return listOf(codec.encode(ProtocolConstants.CommandUnavailable, message.context))
         }
+        val observedAt = SystemClock.elapsedRealtime()
         val startedAt = SystemClock.elapsedRealtime()
-        val replies = adapter.handleCommand(message)
+        val result = commandPipeline.handle(message, observedAt)
+        result.protocolEvents.forEach(stateRepository::recordProtocolEvent)
+        result.powerampEvents.forEach(stateRepository::recordPowerampEvent)
+        observationPipeline.onCommandResult(result, observedAt)
+        val replies = result.replies
         val dispatchMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
-        recordRequestTiming(message, dispatchMs, replies)
-        recordLatencyMeasurement(message, dispatchMs, startedAt)
+        if (result.executed) {
+          recordRequestTiming(message, dispatchMs, replies)
+          recordLatencyMeasurement(message, dispatchMs, startedAt)
+        }
         return replies
       }
 
@@ -138,7 +170,10 @@ class BridgeService : Service() {
 
     createNotificationChannel()
     stateRepository.markServiceStarted()
-    startForeground(NOTIFICATION_ID, buildNotification(stateRepository.state.value))
+    notificationPresenter.foregroundPersistent = activeSettings.foregroundPersistent
+    val initialState = stateRepository.state.value
+    lastNotificationSnapshot = notificationPresenter.snapshot(initialState)
+    startForeground(NOTIFICATION_ID, notificationPresenter.build(initialState))
     powerampGateway.start()
     observeSettings()
     observeState()
@@ -171,6 +206,15 @@ class BridgeService : Service() {
     settingsJob = scope.launch {
       app.appContainer.settingsRepository.settings.collectLatest { settings ->
         activeSettings = settings
+        notificationPresenter.foregroundPersistent = settings.foregroundPersistent
+        lastObservedState?.let { state ->
+          val notificationSnapshot = notificationPresenter.snapshot(state)
+          if (notificationSnapshot != lastNotificationSnapshot) {
+            lastNotificationSnapshot = notificationSnapshot
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, notificationPresenter.build(state))
+          }
+        }
         if (startedPort != settings.port) {
           launch(Dispatchers.IO) {
             runCatching {
@@ -192,6 +236,16 @@ class BridgeService : Service() {
     stateJob?.cancel()
     stateJob = scope.launch {
       app.appContainer.stateRepository.state.collectLatest { state ->
+        val nowMs = SystemClock.elapsedRealtime()
+        val observationResult = observationPipeline.onPlaybackObserved(lastObservedState, state, nowMs)
+        observationResult.protocolEvents.forEach(app.appContainer.stateRepository::recordProtocolEvent)
+        observationResult.powerampEvents.forEach(app.appContainer.stateRepository::recordPowerampEvent)
+        if (observationResult.action == ObservationAction.REPLAY_PLAY) {
+          launch(Dispatchers.IO) {
+            powerampGateway.play()
+          }
+        }
+
         lastObservedState?.let { previous ->
           pendingLatencyMeasurement?.takeIf { measurement ->
             didObserveCommandEffect(previous, state, measurement.command)
@@ -207,9 +261,14 @@ class BridgeService : Service() {
           }
         }
         lastObservedState = state
+        commandPipeline.onPlaybackStateObserved(state.playback.state, nowMs)
 
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, buildNotification(state))
+        val notificationSnapshot = notificationPresenter.snapshot(state)
+        if (notificationSnapshot != lastNotificationSnapshot) {
+          lastNotificationSnapshot = notificationSnapshot
+          val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+          manager.notify(NOTIFICATION_ID, notificationPresenter.build(state))
+        }
         syncPositionTicker(state)
 
         if (!state.broadcastInitialized) {
@@ -332,6 +391,7 @@ class BridgeService : Service() {
     lastBroadcastPositionMs = null
     lastCoverSignalTrackId = null
     lastCoverSignalRevision = null
+    lastNotificationSnapshot = null
 
     if (::server.isInitialized) {
       runCatching { server.stop() }
@@ -487,67 +547,6 @@ class BridgeService : Service() {
     else -> "none"
   }
 
-  private fun buildNotification(state: BridgeUiState): Notification {
-    val launchIntent = PendingIntent.getActivity(
-      this,
-      1,
-      Intent(this, MainActivity::class.java),
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-    val stopIntent = PendingIntent.getService(
-      this,
-      2,
-      Intent(this, BridgeService::class.java).setAction(ACTION_STOP),
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-    val restartIntent = PendingIntent.getService(
-      this,
-      3,
-      Intent(this, BridgeService::class.java).setAction(ACTION_RESTART),
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-
-    val summary = if (state.playback.track.title.isNotBlank()) {
-      "${state.playback.track.title} - ${state.playback.track.artist}"
-    } else {
-      getString(R.string.notification_no_track)
-    }
-
-    val sessionSummary = buildList {
-      add("Port ${state.listenPort}")
-      state.activeClient?.let { add("Client $it") }
-      state.clientId?.let { add("ID $it") }
-      add(
-        when {
-          state.broadcastInitialized -> "Broadcast ready"
-          state.broadcastSocketConnected -> "Broadcast waiting init"
-          else -> "No broadcast socket"
-        }
-      )
-      if (state.requestSocketConnected) {
-        add("Request ${state.activeRequestSocketCount}")
-      }
-    }.joinToString(" | ")
-
-    return NotificationCompat.Builder(this, CHANNEL_ID)
-      .setSmallIcon(android.R.drawable.ic_media_play)
-      .setContentTitle(
-        when {
-          state.serviceStopping -> "Poweramp Bridge stopping"
-          state.manualStopActive && !state.serviceRunning -> "Poweramp Bridge stopped manually"
-          state.listenerActive -> getString(R.string.bridge_notification_title)
-          else -> getString(R.string.bridge_notification_stopped)
-        }
-      )
-      .setContentText(summary)
-      .setSubText(state.serviceStopSummary ?: sessionSummary)
-      .setContentIntent(launchIntent)
-      .setOngoing(activeSettings.foregroundPersistent)
-      .addAction(0, getString(R.string.notification_stop), stopIntent)
-      .addAction(0, getString(R.string.notification_restart), restartIntent)
-      .build()
-  }
-
   private fun createNotificationChannel() {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val channel = NotificationChannel(
@@ -562,7 +561,7 @@ class BridgeService : Service() {
   }
 
   companion object {
-    private const val CHANNEL_ID = "poweramp_bridge"
+    internal const val CHANNEL_ID = "poweramp_bridge"
     private const val NOTIFICATION_ID = 1001
     private const val POSITION_TICK_MS = 1000L
     private const val POSITION_RESYNC_INTERVAL = 5

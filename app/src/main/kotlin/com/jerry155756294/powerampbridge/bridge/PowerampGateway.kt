@@ -84,7 +84,6 @@ class PowerampGateway(
     )
     registered = true
     updateVolumeSnapshot()
-    requestPositionSync()
   }
 
   fun stop() {
@@ -263,7 +262,6 @@ class PowerampGateway(
       )
     }
     resetCoverStateForTrack(realId)
-    requestPositionSync()
     stateRepository.recordPowerampEvent(
       "Track changed ($actionLabel): ${track.getString(PowerampAPI.Track.TITLE).orEmpty()}"
     )
@@ -292,9 +290,6 @@ class PowerampGateway(
           }
         )
       )
-    }
-    if (state == "playing") {
-      requestPositionSync()
     }
     updateVolumeSnapshot()
     stateRepository.recordPowerampEvent("Status changed ($actionLabel): $state")
