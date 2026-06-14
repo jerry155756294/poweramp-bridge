@@ -18,6 +18,17 @@ The goal is to let an existing MBRC sender connect with minimal or no sender-sid
 - It is an independent reimplementation and is not affiliated with MusicBee Remote.
 - It does not bundle the original `mbrc` or `mbrc-plugin` source code.
 
+## Known issue
+
+- On some Xiaomi/MIUI devices, when testing with localhost or a same-device sender app alongside Poweramp, MIUI SystemUI may prioritize the sender app's MediaSession and dispatch `pause` to Poweramp.
+- Current evidence indicates this is a SystemUI MediaSession arbitration issue rather than a bridge protocol failure.
+
+Recommended test setups:
+
+- Realme sender -> Redmi or other receiver device
+- PC or raw socket client -> bridge
+- Any setup that avoids the sender app creating an active MediaSession on the same MIUI device as Poweramp
+
 ## Build
 
 The repository includes a GitHub Actions workflow that builds a debug APK artifact on pushes and pull requests.
