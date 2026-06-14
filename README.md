@@ -2,7 +2,7 @@
 
 `poweramp-bridge` is an Android receiver app that accepts the existing MBRC TCP/JSON protocol and bridges it to Poweramp through the Poweramp API.
 
-The goal is to let an existing MBRC sender connect with minimal or no sender-side changes while controlling a device that is running Poweramp.
+The goal is to let an existing [musicbeeremote/mbrc](https://github.com/musicbeeremote/mbrc) sender connect with minimal or no sender-side changes while controlling a device that is running Poweramp.
 
 ## Current focus
 
