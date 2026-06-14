@@ -101,23 +101,12 @@ class MbrcProtocolAdapter(
         listOf(
           codec.encode(
             ProtocolConstants.NowPlayingList,
-            pagedTrackPayload(
-              stateRepository.state.value,
-              pageRequest(message.data)
-            )
+            pagedQueuePayload(pageRequest(message.data))
           )
         )
 
       ProtocolConstants.NowPlayingQueue ->
-        listOf(
-          codec.encode(
-            ProtocolConstants.NowPlayingQueue,
-            pagedTrackPayload(
-              stateRepository.state.value,
-              pageRequest(message.data)
-            )
-          )
-        )
+        queueResponse(message)
 
       ProtocolConstants.NowPlayingCover ->
         listOf(codec.encode(ProtocolConstants.NowPlayingCover, powerampGateway.currentCoverPayload()))
@@ -125,8 +114,10 @@ class MbrcProtocolAdapter(
       ProtocolConstants.NowPlayingLyrics ->
         listOf(codec.encode(ProtocolConstants.NowPlayingLyrics, mapOf("status" to 404, "lyrics" to "")))
 
+      ProtocolConstants.RadioStations ->
+        listOf(codec.encode(ProtocolConstants.RadioStations, pagedRadioPayload(pageRequest(message.data))))
+
       ProtocolConstants.PlaylistList,
-      ProtocolConstants.RadioStations,
       ProtocolConstants.BrowseGenres,
       ProtocolConstants.BrowseArtists,
       ProtocolConstants.BrowseAlbums,
@@ -140,10 +131,37 @@ class MbrcProtocolAdapter(
       ProtocolConstants.PlayerOutputSwitch ->
         listOf(codec.encode(message.context, mapOf("devices" to emptyList<String>(), "active" to "")))
 
-      ProtocolConstants.PlaylistPlay,
       ProtocolConstants.LibraryPlayAll,
       ProtocolConstants.PlayerMute ->
         unsupportedNoOp(message)
+
+      ProtocolConstants.NowPlayingListPlay -> {
+        val position = asInt(message.data)
+        if (position != null) {
+          val queueItems = powerampGateway.readQueueItems()
+          val success = if (queueItems.isNotEmpty()) {
+            powerampGateway.playQueuePosition(position)
+          } else {
+            stateRepository.state.value.playback.track.path
+              .takeIf { it.isNotBlank() }
+              ?.let(powerampGateway::playPath)
+              ?: false
+          }
+          commandResult(success, ProtocolConstants.NowPlayingListPlay)
+        } else {
+          commandUnavailable(ProtocolConstants.NowPlayingListPlay)
+        }
+      }
+
+      ProtocolConstants.PlaylistPlay -> {
+        val path = rawString(message.data)
+        if (path.isNullOrBlank()) {
+          commandUnavailable(ProtocolConstants.PlaylistPlay)
+        } else {
+          stateRepository.recordProtocolEvent("radio_play_candidate_context:${message.context}:path=$path")
+          commandResult(powerampGateway.playPath(path), ProtocolConstants.PlaylistPlay)
+        }
+      }
 
       else -> {
         if (isLibraryClickContext(message.context)) {
@@ -209,11 +227,8 @@ class MbrcProtocolAdapter(
     "total" to state.playback.track.durationMs
   )
 
-  private fun pagedTrackPayload(
-    state: BridgeUiState,
-    request: PageRequest
-  ): Map<String, Any> {
-    val items = trackItems(state)
+  private fun pagedQueuePayload(request: PageRequest): Map<String, Any> {
+    val items = queueItems()
     val pageData = items.drop(request.offset).take(request.limit)
     return mapOf(
       "total" to items.size,
@@ -223,20 +238,94 @@ class MbrcProtocolAdapter(
     )
   }
 
-  private fun trackItems(state: BridgeUiState): List<Map<String, Any>> {
+  private fun queueItems(): List<Map<String, Any?>> {
+    val queueItems = powerampGateway.readQueueItems()
+    if (queueItems.isNotEmpty()) {
+      stateRepository.recordProtocolEvent("queue_reply_source:poweramp_queue total=${queueItems.size}")
+      return queueItems.mapIndexed { index, item ->
+        linkedMapOf<String, Any?>(
+          "title" to item.title,
+          "artist" to item.artist,
+          "album" to item.album,
+          "path" to item.path,
+          "position" to (index + 1),
+          "id" to item.queueId,
+          "file_id" to item.fileId
+        )
+      }
+    }
+
+    val fallback = fallbackTrack(stateRepository.state.value)
+    if (fallback != null) {
+      stateRepository.recordProtocolEvent("queue_reply_source:current_track_fallback total=1")
+      return listOf(fallback)
+    }
+
+    stateRepository.recordProtocolEvent("queue_reply_source:empty_fallback total=0")
+    return emptyList()
+  }
+
+  private fun fallbackTrack(state: BridgeUiState): Map<String, Any?>? {
     val track = state.playback.track
     if (track.title.isBlank() && track.path.isBlank()) {
-      return emptyList()
+      return null
+    }
+
+    return linkedMapOf<String, Any?>(
+      "title" to track.title,
+      "artist" to track.artist,
+      "album" to track.album,
+      "path" to track.path,
+      "position" to 1,
+      "file_id" to track.realId
+    )
+  }
+
+  private fun queueResponse(message: IncomingMessage): List<String> {
+    val queueCommand = queueCommandRequest(message.data)
+    if (queueCommand != null) {
+      val result = powerampGateway.handleQueueCommand(
+        type = queueCommand.type,
+        paths = queueCommand.paths,
+        playPath = queueCommand.playPath
+      )
+      stateRepository.recordProtocolEvent(
+        "queue_command_result:type=${queueCommand.type} code=${result.code} accepted=${result.accepted} detail=${result.detail}"
+      )
+      return listOf(
+        codec.encode(
+          ProtocolConstants.NowPlayingQueue,
+          mapOf("code" to result.code)
+        )
+      )
     }
 
     return listOf(
-      linkedMapOf(
-        "title" to track.title,
-        "artist" to track.artist,
-        "album" to track.album,
-        "path" to track.path,
-        "position" to 1
+      codec.encode(
+        ProtocolConstants.NowPlayingQueue,
+        pagedQueuePayload(pageRequest(message.data))
       )
+    )
+  }
+
+  private fun pagedRadioPayload(request: PageRequest): Map<String, Any> {
+    val stations = powerampGateway.readRadioStations()
+    stateRepository.recordProtocolEvent("radio_reply_source:poweramp_streams total=${stations.size}")
+    val items = stations.map { station ->
+      linkedMapOf(
+        "name" to station.name,
+        "url" to station.url,
+        "id" to station.streamId,
+        "artist" to station.artist,
+        "album" to station.album
+      )
+    }
+    val pageData = items.drop(request.offset).take(request.limit)
+    return mapOf(
+      "total" to items.size,
+      "offset" to request.offset,
+      "limit" to request.limit,
+      "data" to pageData
     )
   }
 
@@ -370,12 +459,45 @@ class MbrcProtocolAdapter(
     )
   }
 
+  private data class QueueCommandRequest(
+    val type: String,
+    val paths: List<String>,
+    val playPath: String?
+  )
+
+  private fun queueCommandRequest(data: Any?): QueueCommandRequest? {
+    if (data !is Map<*, *>) {
+      return null
+    }
+
+    val type = (data["queue"] as? String)?.trim()?.lowercase()
+      ?.takeIf { it.isNotEmpty() }
+      ?: return null
+    val paths = when (val raw = data["data"]) {
+      is List<*> -> raw.mapNotNull { it as? String }.map(String::trim).filter(String::isNotEmpty)
+      is String -> listOf(raw.trim()).filter(String::isNotEmpty)
+      else -> emptyList()
+    }
+    val playPath = rawString(data["play"])?.trim()?.takeIf { it.isNotEmpty() }
+    return QueueCommandRequest(type = type, paths = paths, playPath = playPath)
+  }
+
   private fun dataAsString(data: Any?): String = when (data) {
     null -> ""
     is String -> data.lowercase()
     is Boolean -> if (data) "on" else "off"
     is Map<*, *> -> JSONObject(data).optString("value").lowercase()
     else -> data.toString().lowercase()
+  }
+
+  private fun rawString(data: Any?): String? = when (data) {
+    null -> null
+    is String -> data
+    is Map<*, *> -> {
+      val value = data["value"] ?: data["url"] ?: data["path"] ?: data["src"]
+      value as? String
+    }
+    else -> data.toString()
   }
 
   private companion object {

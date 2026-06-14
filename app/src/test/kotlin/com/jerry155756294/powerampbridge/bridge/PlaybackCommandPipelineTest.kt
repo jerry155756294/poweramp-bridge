@@ -56,6 +56,8 @@ class PlaybackCommandPipelineTest {
 
     override fun currentCoverStatus(): Int = 404
     override fun currentCoverPayload(): Map<String, Any?> = emptyMap()
+    override fun readQueueItems(): List<PowerampQueueItem> = emptyList()
+    override fun readRadioStations(): List<PowerampRadioStation> = emptyList()
     override fun playPause(): Boolean {
       playPauseCalls += 1
       return true
@@ -71,6 +73,13 @@ class PlaybackCommandPipelineTest {
     override fun stopPlayback(): Boolean = true
     override fun next(): Boolean = true
     override fun previous(): Boolean = true
+    override fun playQueuePosition(position: Int): Boolean = true
+    override fun playPath(path: String): Boolean = true
+    override fun handleQueueCommand(
+      type: String,
+      paths: List<String>,
+      playPath: String?
+    ): QueueCommandResult = QueueCommandResult(200, true, "ok")
     override fun setVolume(volumePercent: Int) = Unit
     override fun refreshVolumeSnapshot() = Unit
     override fun seekTo(positionMs: Long): Boolean = true

@@ -34,8 +34,24 @@ jobs:
       - name: Grant execute permission
         run: chmod +x gradlew
 
+      - name: Compile debug Kotlin
+        run: ./gradlew --no-daemon compileDebugKotlin
+
+      - name: Run debug unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
       - name: Assemble debug APK
         run: ./gradlew --no-daemon assembleDebug
+
+      - name: Upload unit test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: poweramp-bridge-unit-test-report
+          path: |
+            app/build/reports/tests/testDebugUnitTest
+            app/build/test-results/testDebugUnitTest
+          if-no-files-found: warn
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

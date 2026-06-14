@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.database.Cursor
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioManager
@@ -14,8 +15,9 @@ import android.util.Base64
 import androidx.core.content.ContextCompat
 import com.maxmpz.poweramp.player.PowerampAPI
 import com.maxmpz.poweramp.player.PowerampAPIHelper
+import com.maxmpz.poweramp.player.TableDefs
 import java.io.ByteArrayOutputStream
-import kotlin.math.ceil
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,6 +25,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import kotlin.math.ceil
 
 class PowerampGateway(
   private val context: Context,
@@ -142,12 +145,183 @@ class PowerampGateway(
     return coverState.payload()
   }
 
+  override fun readQueueItems(): List<PowerampQueueItem> {
+    if (!refreshAvailability()) {
+      return emptyList()
+    }
+
+    val uri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("queue")
+      .build()
+    return runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf(
+          "${TableDefs.Queue._ID} AS queue_id",
+          "${TableDefs.Queue.FOLDER_FILE_ID} AS file_id",
+          "${TableDefs.Files.TITLE_TAG} AS title_tag",
+          "${TableDefs.Files.ARTIST_TAG} AS artist_tag",
+          "${TableDefs.Files.ALBUM_TAG} AS album_tag",
+          "${TableDefs.Files.URL} AS item_url",
+          "${TableDefs.Files.FULL_PATH} AS item_path"
+        ),
+        null,
+        null,
+        null
+      )?.use { cursor ->
+        buildList {
+          while (cursor.moveToNext()) {
+            add(
+              PowerampQueueItem(
+                queueId = cursor.longOrNull("queue_id"),
+                fileId = cursor.longOrNull("file_id"),
+                title = cursor.stringOrBlank("title_tag"),
+                artist = cursor.stringOrBlank("artist_tag"),
+                album = cursor.stringOrBlank("album_tag"),
+                path = cursor.firstNonBlank("item_url", "item_path")
+              )
+            )
+          }
+        }
+      } ?: emptyList()
+    }.onFailure { error ->
+      Timber.w(error, "Failed querying Poweramp queue")
+      stateRepository.recordPowerampEvent(
+        "Queue query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.getOrDefault(emptyList())
+  }
+
+  override fun readRadioStations(): List<PowerampRadioStation> {
+    if (!refreshAvailability()) {
+      return emptyList()
+    }
+
+    val uri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("streams")
+      .build()
+    return runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf(
+          "${TableDefs.Files._ID} AS stream_id",
+          "${TableDefs.Files.NAME_WITHOUT_NUMBER} AS station_name",
+          "${TableDefs.Files.TITLE_TAG} AS title_tag",
+          "${TableDefs.Files.ARTIST_TAG} AS artist_tag",
+          "${TableDefs.Files.ALBUM_TAG} AS album_tag",
+          "${TableDefs.Files.URL} AS stream_url",
+          "${TableDefs.Files.FULL_PATH} AS stream_path"
+        ),
+        null,
+        null,
+        null
+      )?.use { cursor ->
+        buildList {
+          while (cursor.moveToNext()) {
+            val streamId = cursor.longOrNull("stream_id") ?: continue
+            add(
+              PowerampRadioStation(
+                streamId = streamId,
+                name = cursor.firstNonBlank("station_name", "title_tag", "stream_url", "stream_path"),
+                url = cursor.firstNonBlank("stream_url", "stream_path"),
+                artist = cursor.stringOrBlank("artist_tag"),
+                album = cursor.stringOrBlank("album_tag")
+              )
+            )
+          }
+        }
+      } ?: emptyList()
+    }.onFailure { error ->
+      Timber.w(error, "Failed querying Poweramp streams")
+      stateRepository.recordPowerampEvent(
+        "Radio query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.getOrDefault(emptyList())
+  }
+
   override fun playPause(): Boolean = sendCommand(PowerampAPI.Commands.TOGGLE_PLAY_PAUSE)
   override fun play(): Boolean = sendCommand(PowerampAPI.Commands.PLAY)
   override fun pause(): Boolean = sendCommand(PowerampAPI.Commands.PAUSE)
   override fun stopPlayback(): Boolean = sendCommand(PowerampAPI.Commands.STOP)
   override fun next(): Boolean = sendCommand(PowerampAPI.Commands.NEXT)
   override fun previous(): Boolean = sendCommand(PowerampAPI.Commands.PREVIOUS)
+
+  override fun playQueuePosition(position: Int): Boolean {
+    if (position <= 0) {
+      return false
+    }
+
+    val item = readQueueItems().getOrNull(position - 1) ?: return false
+    val uri = when {
+      item.queueId != null && item.queueId > 0L -> PowerampAPI.ROOT_URI.buildUpon()
+        .appendEncodedPath("queue")
+        .appendEncodedPath(item.queueId.toString())
+        .build()
+
+      item.fileId != null && item.fileId > 0L -> PowerampAPI.ROOT_URI.buildUpon()
+        .appendEncodedPath("files")
+        .appendEncodedPath(item.fileId.toString())
+        .build()
+
+      else -> parsePlayableUri(item.path)
+    } ?: return false
+
+    stateRepository.recordPowerampEvent("Queue play dispatch: position=$position uri=$uri")
+    return openToPlay(uri)
+  }
+
+  override fun playPath(path: String): Boolean {
+    val trimmed = path.trim()
+    if (trimmed.isEmpty()) {
+      return false
+    }
+
+    val matchedStream = readRadioStations().firstOrNull { it.url.equals(trimmed, ignoreCase = true) }
+    val uri = if (matchedStream != null) {
+      PowerampAPI.ROOT_URI.buildUpon()
+        .appendEncodedPath("streams")
+        .appendEncodedPath(matchedStream.streamId.toString())
+        .build()
+    } else {
+      parsePlayableUri(trimmed)
+    } ?: return false
+
+    stateRepository.recordPowerampEvent(
+      "Path play dispatch: source=${if (matchedStream != null) "stream_id" else "direct_uri"} target=$uri"
+    )
+    return openToPlay(uri)
+  }
+
+  override fun handleQueueCommand(
+    type: String,
+    paths: List<String>,
+    playPath: String?
+  ): QueueCommandResult {
+    val normalizedType = type.trim().lowercase()
+    if (paths.isEmpty()) {
+      return QueueCommandResult(400, accepted = false, detail = "queue command rejected: empty data")
+    }
+
+    return when (normalizedType) {
+      "now", "default" -> {
+        val target = playPath?.takeIf { requested ->
+          paths.any { it.equals(requested, ignoreCase = true) }
+        } ?: paths.first()
+        val success = this.playPath(target)
+        QueueCommandResult(
+          code = if (success) 200 else 500,
+          accepted = success,
+          detail = "queue command type=$normalizedType play=$target count=${paths.size}"
+        )
+      }
+
+      else -> QueueCommandResult(
+        code = 501,
+        accepted = false,
+        detail = "queue command unsupported: type=$normalizedType count=${paths.size}"
+      )
+    }
+  }
 
   override fun seekTo(positionMs: Long): Boolean {
     val clampedMs = positionMs.coerceAtLeast(0L)
@@ -342,8 +516,23 @@ class PowerampGateway(
     return result
   }
 
+  private fun openToPlay(uri: Uri): Boolean =
+    sendCommand(PowerampAPI.Commands.OPEN_TO_PLAY) { intent ->
+      intent.data = uri
+    }
+
   private fun bundleString(bundle: Bundle, key: String): String =
     if (bundle.containsKey(key)) bundle.get(key)?.toString().orEmpty() else ""
+
+  private fun parsePlayableUri(path: String): Uri? = when {
+    path.startsWith("http://", ignoreCase = true) ||
+      path.startsWith("https://", ignoreCase = true) ||
+      path.startsWith("content://", ignoreCase = true) ||
+      path.startsWith("file://", ignoreCase = true) -> Uri.parse(path)
+
+    path.startsWith("/") -> Uri.fromFile(File(path))
+    else -> Uri.parse(path)
+  }
 
   private fun normalizePositionMs(positionMs: Long, durationMs: Long): Long {
     val sanitized = positionMs.coerceAtLeast(0L)
@@ -672,6 +861,35 @@ class PowerampGateway(
     const val MAX_COVER_DIMENSION = 1024
     const val COVER_JPEG_QUALITY = 95
   }
+}
+
+private fun Cursor.stringOrBlank(columnName: String): String =
+  stringOrNull(columnName).orEmpty()
+
+private fun Cursor.stringOrNull(columnName: String): String? {
+  val index = getColumnIndex(columnName)
+  if (index < 0 || isNull(index)) {
+    return null
+  }
+  return getString(index)
+}
+
+private fun Cursor.longOrNull(columnName: String): Long? {
+  val index = getColumnIndex(columnName)
+  if (index < 0 || isNull(index)) {
+    return null
+  }
+  return getLong(index)
+}
+
+private fun Cursor.firstNonBlank(vararg columnNames: String): String {
+  columnNames.forEach { columnName ->
+    stringOrNull(columnName)
+      ?.trim()
+      ?.takeIf { it.isNotEmpty() }
+      ?.let { return it }
+  }
+  return ""
 }
 
 internal object PowerampBroadcastDiagnostics {

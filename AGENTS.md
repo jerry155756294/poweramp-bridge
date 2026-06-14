@@ -161,10 +161,16 @@ Current reality:
 - `compileDebugKotlin` passes
 - `assembleDebug` passes
 - `testDebugUnitTest` currently has a test initialization / class loading issue in local runs and should be treated separately from app logic regressions
+- For shared verification and APK output, prefer GitHub Actions over local builds.
+- Treat GitHub Actions as the default build path for future APK generation unless the user explicitly asks for a local build.
 
 CI:
 - Workflow file: `.github/workflows/android-ci.yml`
 - Output artifact: `poweramp-bridge-debug-apk`
+- Default expectation:
+  - use GitHub Actions for `compileDebugKotlin`
+  - use GitHub Actions for `testDebugUnitTest`
+  - use GitHub Actions for debug APK generation
 - Latest verified CI build:
   - branch: `codex/github-actions-apk`
   - commit: `61e678e`
@@ -202,7 +208,7 @@ CI:
 - The current suspected regression point is `c097713` `Stabilize manual bridge stop flow`.
 - Do not discard the current evidence build when testing rollback branches; keep evidence and rollback experiments on separate branches or worktrees.
 - Prefer GitHub Actions artifacts for APK generation during this investigation.
-- Avoid local Gradle builds unless the user explicitly asks for them; local RAM pressure is an active constraint.
+- Avoid local Gradle builds unless the user explicitly asks for them; local RAM pressure and Windows-local test instability are active constraints.
 - For this bug, treat these log sequences as the highest-value evidence:
   - `playerplaypause` or `playerplay`
   - Poweramp enters `playing`

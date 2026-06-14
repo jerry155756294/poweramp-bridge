@@ -145,14 +145,17 @@
   - `dumpsys media_session` confirms track metadata changed from:
     - `XNOR XNOR XNOR, Frums, Metacontinues`
     - to `Yeh Hua Dam (Aka_ Look at the Owl), Darkie, Cambodian Cassette Archives...`
+- MBRC cover display path has been fixed.
+  - Prior `Poweramp: cover load missing` churn at roughly `15-30ms` intervals is no longer the active issue to investigate.
+- Tapping `Stop bridge` in Settings no longer crashes `poweramp-bridge`.
+  - The previous bridge-stop crash is considered fixed and should not remain on the active bug list.
 
 ### Still Fragile / Open
 - Sender app UI `next` is still inconsistent.
   - In some runs the sender remains on `Now playing` but bridge only sees `player / protocol`, with no `playernext`.
   - This currently looks more like sender-side UI / touch / flow instability than a bridge execution failure, because shell `playernext` is confirmed good.
-- Queue semantics remain shallow.
-- Library/list compatibility remains mostly legal-empty.
-- Cover interoperability still needs more sender verification.
+- Queue and radio sync are now partially upgraded to Poweramp-backed data paths, but still need broader sender verification under real use.
+- Library/list compatibility outside queue/radio remains mostly legal-empty.
 - Local `testDebugUnitTest` still fails with test initialization / class loading issues.
 
 ## Important Evidence Files In Workspace
@@ -176,20 +179,22 @@
 
 ## Build / Test Status
 - Verified app build path:
-  - GitHub Actions build only for release verification
+  - GitHub Actions is the primary verification path for compile + unit test + debug APK
 - Local Gradle state remains useful for development:
   - `./gradlew compileDebugKotlin`
   - `./gradlew assembleDebug`
+  - `./gradlew compileDebugUnitTestKotlin`
 - Current local test issue:
   - `./gradlew testDebugUnitTest`
-  - still fails during test initialization / class loading
+  - currently compiles test sources, but test execution on this Windows machine may still fail with broad `ClassNotFoundException` initialization errors
+  - do not treat those local failures as app-logic regressions until GitHub Actions reproduces them
 
 ## Recommended Next Steps
 1. Continue real-device investigation of sender app UI `next` now that bridge-side `playernext` is proven good via shell.
 2. Use the new logcat diagnostics as the primary truth source for sender UI command emission.
-3. Tighten queue/list behavior so sender UI cannot duplicate or misread items.
-4. Keep validating cover behavior against the real sender.
-5. Fix the local unit-test class loading issue so protocol changes can be regression tested normally.
+3. Broaden real-device verification for queue/radio behavior now that Poweramp-backed paths exist.
+4. Tighten remaining list semantics so sender UI cannot duplicate or misread items.
+5. If GitHub Actions still reports unit-test failures, separate repo test issues from Windows-local toolchain issues before changing app logic.
 
 ## Notes For The Next Agent / Engineer
 - Treat `BridgeStateRepository` as the source of truth for UI and diagnostics.
