@@ -42,6 +42,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jerry155756294.powerampbridge.bridge.BridgeService
 import com.jerry155756294.powerampbridge.bridge.BridgeUiState
+import com.jerry155756294.powerampbridge.bridge.LogEntry
+import com.jerry155756294.powerampbridge.bridge.serviceStatusLabel
+import com.jerry155756294.powerampbridge.bridge.shouldAutoStart
 import com.jerry155756294.powerampbridge.data.BridgeSettings
 import com.jerry155756294.powerampbridge.data.BridgeSettingsRepository
 import com.jerry155756294.powerampbridge.ui.BridgeTheme
@@ -85,8 +88,8 @@ private fun BridgeApp(
   val settings by settingsRepository.settings.collectAsStateWithLifecycle(initialValue = BridgeSettings())
   var selectedTab by remember { mutableIntStateOf(0) }
 
-  LaunchedEffect(settings.autoStart, uiState.serviceRunning) {
-    if (settings.autoStart && !uiState.serviceRunning) {
+  LaunchedEffect(settings.autoStart, uiState.serviceRunning, uiState.serviceStopping, uiState.manualStopActive) {
+    if (uiState.shouldAutoStart(settings.autoStart)) {
       onStart()
     }
   }
@@ -99,11 +102,7 @@ private fun BridgeApp(
         .padding(padding)
     ) {
       TabRow(selectedTabIndex = selectedTab) {
-        listOf(
-          stringResourceSafe(R.string.tab_settings),
-          stringResourceSafe(R.string.tab_status),
-          stringResourceSafe(R.string.tab_debug)
-        ).forEachIndexed { index, title ->
+        listOf("Settings", "Status", "Debug").forEachIndexed { index, title ->
           Tab(
             selected = selectedTab == index,
             onClick = { selectedTab = index },
@@ -114,8 +113,8 @@ private fun BridgeApp(
 
       when (selectedTab) {
         0 -> SettingsTab(uiState, settings, onStart, onStop, settingsRepository)
-        1 -> StatusTab(uiState)
-        else -> DebugTab(uiState)
+        1 -> StatusTab(uiState, settings.advancedDiagnosticsEnabled)
+        else -> DebugTab(uiState, settings.advancedDiagnosticsEnabled)
       }
     }
   }
@@ -139,7 +138,7 @@ private fun SettingsTab(
       .padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp)
   ) {
-    SectionCard(stringResourceSafe(R.string.settings_network_title)) {
+    SectionCard("Network") {
       OutlinedTextField(
         value = portText,
         onValueChange = {
@@ -153,46 +152,69 @@ private fun SettingsTab(
         modifier = Modifier.fillMaxWidth()
       )
       Text(
-        text = stringResourceSafe(R.string.settings_no_token_notice),
+        text = "Use this LAN/Tailscale address and port from your MBRC sender.",
         style = MaterialTheme.typography.bodySmall
       )
     }
 
-    SectionCard(stringResourceSafe(R.string.settings_ip_title)) {
+    SectionCard("Local Addresses") {
       if (uiState.localAddresses.isEmpty()) {
-        Text(stringResourceSafe(R.string.settings_ip_empty))
+        Text("No active address yet.")
       } else {
         uiState.localAddresses.forEach { address ->
           StatusLine("IP", address)
         }
       }
-      Text(
-        text = stringResourceSafe(R.string.settings_ip_hint),
-        style = MaterialTheme.typography.bodySmall
-      )
     }
 
-    SectionCard(stringResourceSafe(R.string.settings_service_title)) {
-      SettingSwitch(stringResourceSafe(R.string.settings_auto_start), settings.autoStart) {
+    SectionCard("Service") {
+      SettingSwitch("Auto start bridge with app", settings.autoStart) {
         scope.launch { repository.updateAutoStart(it) }
       }
-      SettingSwitch(stringResourceSafe(R.string.settings_start_on_boot), settings.startOnBoot) {
+      SettingSwitch("Start bridge on boot", settings.startOnBoot) {
         scope.launch { repository.updateStartOnBoot(it) }
       }
-      SettingSwitch(stringResourceSafe(R.string.settings_foreground_persistent), settings.foregroundPersistent) {
+      SettingSwitch("Persistent foreground notification", settings.foregroundPersistent) {
         scope.launch { repository.updateForegroundPersistent(it) }
+      }
+      SettingSwitch("Minimal notification debug mode", settings.minimalForegroundNotification) {
+        scope.launch { repository.updateMinimalForegroundNotification(it) }
+      }
+      SettingSwitch("Professional diagnostics mode", settings.advancedDiagnosticsEnabled) {
+        scope.launch { repository.updateAdvancedDiagnostics(it) }
+      }
+      Text(
+        text = if (settings.advancedDiagnosticsEnabled) {
+          "Shows raw protocol categories, handshake state, and low-level debug events."
+        } else {
+          "Shows simpler health summaries without low-level protocol terminology."
+        },
+        style = MaterialTheme.typography.bodySmall
+      )
+      if (settings.minimalForegroundNotification) {
+        Text(
+          text = "Foreground notification debug mode keeps the bridge notification mostly static to test System UI pause interactions.",
+          style = MaterialTheme.typography.bodySmall
+        )
       }
     }
 
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-      Button(onClick = onStart) { Text(stringResourceSafe(R.string.start_bridge)) }
-      Button(onClick = onStop) { Text(stringResourceSafe(R.string.stop_bridge)) }
+      Button(onClick = onStart) { Text("Start Bridge") }
+      Button(onClick = onStop) { Text("Stop Bridge") }
+    }
+
+    uiState.serviceStopSummary?.let { summary ->
+      SectionCard("Stop State") {
+        StatusLine("Status", summary)
+        StatusLine("Behavior", uiState.serviceStopDetail ?: "No extra detail.")
+      }
     }
   }
 }
 
 @Composable
-private fun StatusTab(uiState: BridgeUiState) {
+private fun StatusTab(uiState: BridgeUiState, advancedMode: Boolean) {
   Column(
     modifier = Modifier
       .fillMaxSize()
@@ -201,37 +223,51 @@ private fun StatusTab(uiState: BridgeUiState) {
     verticalArrangement = Arrangement.spacedBy(12.dp)
   ) {
     SectionCard("Bridge") {
-      StatusLine("服務", if (uiState.serviceRunning) "執行中" else "已停止")
-      StatusLine("Listener", if (uiState.listenerActive) "TCP ${uiState.listenPort}" else "未啟動")
-      StatusLine("目前 IP", uiState.localAddresses.firstOrNull() ?: stringResourceSafe(R.string.settings_ip_empty))
-      StatusLine("Client IP", uiState.activeClient ?: stringResourceSafe(R.string.client_none))
-      StatusLine("Client ID", uiState.clientId ?: "未提供")
-      StatusLine("協議版本", uiState.protocolVersion?.toString() ?: "未知")
-      StatusLine("主 socket", socketStatus(uiState.broadcastSocketConnected, uiState.broadcastInitialized))
-      StatusLine("請求 socket", uiState.activeRequestSocketCount.toString())
-      StatusLine("位置同步", if (uiState.positionSyncActive) "進行中" else "閒置")
-      StatusLine("最近 verifyconnection", uiState.lastProbeAt ?: "尚無")
-      StatusLine("最近拒絕", uiState.lastRejectedReason ?: "尚無")
-      StatusLine("最近斷線", uiState.lastDisconnectReason ?: "尚無")
-      StatusLine("斷線摘要", formatDisconnectSummary(uiState))
+      StatusLine("Service", uiState.serviceStatusLabel())
+      StatusLine("Listener", if (uiState.listenerActive) "TCP ${uiState.listenPort}" else "Offline")
+      StatusLine("Primary IP", uiState.localAddresses.firstOrNull() ?: "Unavailable")
+      StatusLine("Client IP", uiState.activeClient ?: "None")
+      StatusLine("Client ID", uiState.clientId ?: "None")
+      StatusLine("Protocol", uiState.protocolVersion?.toString() ?: "Unknown")
+      StatusLine("Broadcast Socket", socketStatus(uiState.broadcastSocketConnected, uiState.broadcastInitialized))
+      StatusLine("Request Sockets", uiState.activeRequestSocketCount.toString())
+      StatusLine("Position Sync", if (uiState.positionSyncActive) "Active" else "Idle")
+      StatusLine("Last Verifyconnection", uiState.lastProbeAt ?: "None yet")
+      StatusLine("Stop Summary", uiState.serviceStopSummary ?: "None")
+      StatusLine("Stop Detail", uiState.serviceStopDetail ?: "None")
+      StatusLine("Last Rejection", uiState.lastRejectedReason ?: "None yet")
+      StatusLine(
+        "Last Disconnect",
+        if (advancedMode) uiState.lastDisconnectReason ?: "None yet" else summarizeDisconnect(uiState)
+      )
+      if (advancedMode) {
+        StatusLine("Disconnect Details", formatDisconnectSummary(uiState))
+      }
+    }
+
+    SectionCard("Control Latency") {
+      StatusLine("Rating", latencyRating(uiState))
+      StatusLine("Last Command", uiState.latencySummary.lastCommand ?: "None yet")
+      StatusLine(
+        if (advancedMode) "Latency Details" else "Latency Summary",
+        formatLatency(uiState, advancedMode)
+      )
     }
 
     SectionCard("Poweramp") {
-      StatusLine(
-        "可用性",
-        if (uiState.powerampAvailable) stringResourceSafe(R.string.poweramp_present)
-        else stringResourceSafe(R.string.poweramp_missing)
-      )
-      StatusLine("播放狀態", uiState.playback.state)
+      StatusLine("Availability", if (uiState.powerampAvailable) "Connected" else "Not detected")
+      StatusLine("Playback State", uiState.playback.state)
       StatusLine("Repeat / Shuffle", "${uiState.playback.repeat} / ${uiState.playback.shuffle}")
-      StatusLine("音量", "${uiState.playback.volume}%")
+      StatusLine("Volume", "${uiState.playback.volume}%")
+      StatusLine("Cover State", uiState.coverState.summary())
+      StatusLine("Cover Detail", uiState.coverState.detail())
     }
 
-    SectionCard("目前曲目") {
-      StatusLine("Title", uiState.playback.track.title.ifBlank { "無" })
-      StatusLine("Artist", uiState.playback.track.artist.ifBlank { "無" })
-      StatusLine("Album", uiState.playback.track.album.ifBlank { "無" })
-      StatusLine("Path", uiState.playback.track.path.ifBlank { "無" })
+    SectionCard("Now Playing") {
+      StatusLine("Title", uiState.playback.track.title.ifBlank { "Unknown" })
+      StatusLine("Artist", uiState.playback.track.artist.ifBlank { "Unknown" })
+      StatusLine("Album", uiState.playback.track.album.ifBlank { "Unknown" })
+      StatusLine("Path", uiState.playback.track.path.ifBlank { "Unknown" })
       StatusLine(
         "Position",
         "${uiState.playback.track.positionMs / 1000}s / ${uiState.playback.track.durationMs / 1000}s"
@@ -241,7 +277,7 @@ private fun StatusTab(uiState: BridgeUiState) {
 }
 
 @Composable
-private fun DebugTab(uiState: BridgeUiState) {
+private fun DebugTab(uiState: BridgeUiState, advancedMode: Boolean) {
   Column(
     modifier = Modifier
       .fillMaxSize()
@@ -249,36 +285,33 @@ private fun DebugTab(uiState: BridgeUiState) {
       .padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp)
   ) {
-    SectionCard("最後錯誤") {
-      Text(uiState.lastError ?: "目前沒有錯誤")
+    SectionCard("Last Error") {
+      Text(uiState.lastError ?: "No error recorded.")
     }
-    SectionCard("最近協議事件") {
-      if (uiState.recentProtocolEvents.isEmpty()) {
-        Text("尚無")
-      } else {
-        uiState.recentProtocolEvents.forEach { entry ->
-          StatusLine(entry.timestamp, entry.message)
-        }
-      }
+
+    SectionCard(if (advancedMode) "Protocol Events" else "Bridge Events") {
+      EventList(uiState.recentProtocolEvents, advancedMode)
     }
-    SectionCard("最近收到的命令") {
-      if (uiState.recentCommands.isEmpty()) {
-        Text("尚無")
-      } else {
-        uiState.recentCommands.forEach { entry ->
-          StatusLine(entry.timestamp, entry.message)
-        }
-      }
+
+    SectionCard("Recent Commands") {
+      EventList(uiState.recentCommands, true)
     }
-    SectionCard("最近 Poweramp 事件") {
-      if (uiState.recentPowerampEvents.isEmpty()) {
-        Text("尚無")
-      } else {
-        uiState.recentPowerampEvents.forEach { entry ->
-          StatusLine(entry.timestamp, entry.message)
-        }
-      }
+
+    SectionCard("Poweramp Events") {
+      EventList(uiState.recentPowerampEvents, true)
     }
+  }
+}
+
+@Composable
+private fun EventList(events: List<LogEntry>, advancedMode: Boolean) {
+  if (events.isEmpty()) {
+    Text("No entries yet.")
+    return
+  }
+
+  events.forEach { entry ->
+    StatusLine(entry.timestamp, if (advancedMode) entry.message else humanizeProtocolEvent(entry.message))
   }
 }
 
@@ -329,9 +362,9 @@ private fun StatusLine(label: String, value: String) {
 }
 
 private fun socketStatus(connected: Boolean, initialized: Boolean): String = when {
-  initialized -> "已完成 init"
-  connected -> "已連線，等待 init"
-  else -> "未連線"
+  initialized -> "Ready"
+  connected -> "Connected, waiting for init"
+  else -> "Disconnected"
 }
 
 private fun formatDisconnectSummary(uiState: BridgeUiState): String = buildList {
@@ -341,8 +374,66 @@ private fun formatDisconnectSummary(uiState: BridgeUiState): String = buildList 
   uiState.lastDisconnectLastCommand?.let { add("last_in=$it") }
   uiState.lastDisconnectLastReply?.let { add("last_out=$it") }
 }.ifEmpty {
-  listOf("尚無")
+  listOf("No disconnect details yet.")
 }.joinToString(" | ")
 
-@Composable
-private fun stringResourceSafe(id: Int): String = androidx.compose.ui.res.stringResource(id)
+private fun summarizeDisconnect(uiState: BridgeUiState): String {
+  val category = uiState.lastDisconnectCategory ?: return "No disconnect details yet."
+  return humanizeDisconnectCategory(category)
+}
+
+private fun formatLatency(uiState: BridgeUiState, advancedMode: Boolean): String {
+  val latency = uiState.latencySummary
+  val average = latency.averageMs ?: return "No latency sample yet."
+  val max = latency.maxMs ?: average
+  val last = latency.lastObservedMs ?: latency.lastDispatchMs ?: average
+  return if (advancedMode) {
+    val observed = latency.lastObservedMs?.let { "${it}ms" } ?: "unconfirmed"
+    val effect = latency.lastEffectStatus ?: "unknown"
+    "last=${last}ms | dispatch=${latency.lastDispatchMs ?: 0}ms | observed=$observed | effect=$effect | avg=${average}ms | max=${max}ms | samples=${latency.sampleCount}"
+  } else {
+    "avg ${average}ms | max ${max}ms | last ${last}ms"
+  }
+}
+
+private fun latencyRating(uiState: BridgeUiState): String {
+  val average = uiState.latencySummary.averageMs ?: return "Unknown"
+  return when {
+    average <= 150L -> "Low"
+    average <= 400L -> "Medium"
+    else -> "High"
+  }
+}
+
+private fun humanizeDisconnectCategory(category: String): String = when (category) {
+  "probe_socket_completed" -> "Verifyconnection probe completed normally."
+  "request_socket_completed" -> "A request socket completed normally."
+  "request_socket_peer_closed_after_command" -> "A request socket closed after finishing a command."
+  "broadcast_replaced_by_same_client" -> "The main broadcast socket was replaced by the same sender."
+  "broadcast_peer_closed_before_player" -> "The connection closed before the sender introduced itself."
+  "broadcast_peer_closed_during_handshake" -> "The connection closed during handshake."
+  "broadcast_peer_closed_after_init" -> "The main broadcast socket closed after initialization."
+  "single_client_only" -> "A different sender was rejected because only one sender is allowed."
+  "protocol_violation_before_player" -> "The sender talked before the player handshake step."
+  "protocol_violation_before_protocol" -> "The sender skipped the protocol handshake step."
+  "protocol_violation_before_init" -> "The sender sent commands before init completed."
+  else -> if (category.startsWith("socket_read_error:")) {
+    "The socket closed because of a read error."
+  } else {
+    category
+  }
+}
+
+private fun humanizeProtocolEvent(message: String): String = when {
+  message.startsWith("listener_started:") -> "Listener started."
+  message.startsWith("listener_stopped") -> "Listener stopped."
+  message.startsWith("socket_accepted:") -> "A client connected."
+  message.startsWith("socket_rejected:") -> "A client was rejected."
+  message.startsWith("broadcast_ready:") -> "Broadcast channel is ready."
+  message.startsWith("socket_closed:") -> {
+    val category = message.substringAfterLast(':', "")
+    if (category.isBlank()) "A socket closed." else humanizeDisconnectCategory(category)
+  }
+  message.startsWith("socket_in:") -> "A protocol message was received."
+  else -> message
+}

@@ -62,8 +62,67 @@ data class ConnectionEventSnapshot(
   val lastOutgoingContext: String? = null
 )
 
+data class LatencySummary(
+  val lastCommand: String? = null,
+  val lastDispatchMs: Long? = null,
+  val lastObservedMs: Long? = null,
+  val lastEffectStatus: String? = null,
+  val averageMs: Long? = null,
+  val maxMs: Long? = null,
+  val sampleCount: Int = 0,
+  val totalMs: Long = 0L
+)
+
+enum class CoverStateStatus {
+  LOADING,
+  READY,
+  MISSING,
+  ERROR
+}
+
+data class CoverSnapshot(
+  val realId: Long = 0L,
+  val status: CoverStateStatus = CoverStateStatus.MISSING,
+  val base64: String? = null,
+  val elapsedMs: Long? = null,
+  val detailReason: String? = null,
+  val detailUri: String? = null,
+  val detailWidth: Int? = null,
+  val detailHeight: Int? = null,
+  val detailMime: String? = null,
+  val errorMessage: String? = null
+) {
+  fun statusOnlyCode(): Int =
+    if (status == CoverStateStatus.READY && !base64.isNullOrEmpty()) 1 else 404
+
+  fun payload(): Map<String, Any?> =
+    if (status == CoverStateStatus.READY && !base64.isNullOrEmpty()) {
+      mapOf("status" to 200, "cover" to base64)
+    } else {
+      mapOf("status" to 404, "cover" to null)
+    }
+
+  fun summary(): String = status.name.lowercase()
+
+  fun detail(): String = buildList {
+    add("track=${realId.takeIf { it > 0L } ?: "none"}")
+    elapsedMs?.let { add("elapsed=${it}ms") }
+    detailReason?.takeIf { it.isNotBlank() }?.let { add("reason=$it") }
+    if (detailWidth != null || detailHeight != null) {
+      add("bounds=${detailWidth ?: "?"}x${detailHeight ?: "?"}")
+    }
+    detailMime?.takeIf { it.isNotBlank() }?.let { add("mime=$it") }
+    detailUri?.takeIf { it.isNotBlank() }?.let { add("uri=$it") }
+    errorMessage?.takeIf { it.isNotBlank() }?.let { add("error=$it") }
+  }.joinToString(" | ")
+}
+
 data class BridgeUiState(
   val serviceRunning: Boolean = false,
+  val serviceStopping: Boolean = false,
+  val manualStopActive: Boolean = false,
+  val serviceStopSummary: String? = null,
+  val serviceStopDetail: String? = null,
   val listenerActive: Boolean = false,
   val listenPort: Int = 3000,
   val localAddresses: List<String> = emptyList(),
@@ -83,13 +142,26 @@ data class BridgeUiState(
   val lastDisconnectHandshakeState: String? = null,
   val lastDisconnectLastCommand: String? = null,
   val lastDisconnectLastReply: String? = null,
+  val latencySummary: LatencySummary = LatencySummary(),
   val positionSyncActive: Boolean = false,
+  val coverState: CoverSnapshot = CoverSnapshot(),
+  val coverSignalRevision: Long = 0L,
   val playback: PlaybackSnapshot = PlaybackSnapshot(),
   val recentCommands: List<LogEntry> = emptyList(),
   val recentProtocolEvents: List<LogEntry> = emptyList(),
   val recentPowerampEvents: List<LogEntry> = emptyList(),
   val lastError: String? = null
 )
+
+internal fun BridgeUiState.shouldAutoStart(autoStartEnabled: Boolean): Boolean =
+  autoStartEnabled && !serviceRunning && !serviceStopping && !manualStopActive
+
+internal fun BridgeUiState.serviceStatusLabel(): String = when {
+  serviceStopping -> "Stopping"
+  serviceRunning -> "Running"
+  manualStopActive -> "Stopped manually"
+  else -> "Stopped"
+}
 
 internal fun BridgeUiState.withSession(snapshot: LogicalClientSnapshot?): BridgeUiState =
   copy(

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Poweramp Bridge Protocol Triage"
+  short_description: "Classify disconnects and socket events."
+  default_prompt: "Use this skill to classify peer_closed, reconnect, and request socket behavior in poweramp-bridge."

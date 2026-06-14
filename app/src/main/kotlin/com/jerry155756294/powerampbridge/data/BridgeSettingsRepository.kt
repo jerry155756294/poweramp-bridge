@@ -19,7 +19,9 @@ class BridgeSettingsRepository(
       port = preferences[Keys.Port]?.takeIf { it in 1..65535 } ?: 3000,
       autoStart = preferences[Keys.AutoStart] ?: false,
       startOnBoot = preferences[Keys.StartOnBoot] ?: false,
-      foregroundPersistent = preferences[Keys.ForegroundPersistent] ?: true
+      foregroundPersistent = preferences[Keys.ForegroundPersistent] ?: true,
+      minimalForegroundNotification = preferences[Keys.MinimalForegroundNotification] ?: false,
+      advancedDiagnosticsEnabled = preferences[Keys.AdvancedDiagnosticsEnabled] ?: false
     )
   }
 
@@ -39,11 +41,23 @@ class BridgeSettingsRepository(
     context.dataStore.edit { it[Keys.ForegroundPersistent] = enabled }
   }
 
+  suspend fun updateMinimalForegroundNotification(enabled: Boolean) {
+    context.dataStore.edit { it[Keys.MinimalForegroundNotification] = enabled }
+  }
+
+  suspend fun updateAdvancedDiagnostics(enabled: Boolean) {
+    context.dataStore.edit { it[Keys.AdvancedDiagnosticsEnabled] = enabled }
+  }
+
   private object Keys {
     val Port: Preferences.Key<Int> = intPreferencesKey("port")
     val AutoStart: Preferences.Key<Boolean> = booleanPreferencesKey("auto_start")
     val StartOnBoot: Preferences.Key<Boolean> = booleanPreferencesKey("start_on_boot")
     val ForegroundPersistent: Preferences.Key<Boolean> =
       booleanPreferencesKey("foreground_persistent")
+    val MinimalForegroundNotification: Preferences.Key<Boolean> =
+      booleanPreferencesKey("minimal_foreground_notification")
+    val AdvancedDiagnosticsEnabled: Preferences.Key<Boolean> =
+      booleanPreferencesKey("advanced_diagnostics_enabled")
   }
 }

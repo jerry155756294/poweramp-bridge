@@ -5,13 +5,68 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import timber.log.Timber
 
 class BridgeStateRepository {
   private val _state = MutableStateFlow(BridgeUiState())
   val state: StateFlow<BridgeUiState> = _state.asStateFlow()
 
-  fun setServiceRunning(running: Boolean) {
-    _state.update { it.copy(serviceRunning = running) }
+  fun markServiceStarted() {
+    _state.update {
+      it.copy(
+        serviceRunning = true,
+        serviceStopping = false,
+        manualStopActive = false,
+        serviceStopSummary = null,
+        serviceStopDetail = null
+      )
+    }
+  }
+
+  fun markManualStopRequested() {
+    Timber.i("Manual stop requested")
+    _state.update {
+      it.copy(
+        serviceStopping = true,
+        manualStopActive = true,
+        serviceStopSummary = "Manual stop requested",
+        serviceStopDetail = "Bridge is stopping and will stay stopped until started again."
+      )
+    }
+  }
+
+  fun markServiceStopping(manualStop: Boolean = _state.value.manualStopActive) {
+    Timber.i("Service stopping (manual_stop=%s)", manualStop)
+    _state.update {
+      it.copy(
+        serviceRunning = true,
+        serviceStopping = true,
+        manualStopActive = manualStop,
+        serviceStopSummary = if (manualStop) "Manual stop requested" else "Bridge stopping",
+        serviceStopDetail = if (manualStop) {
+          "Bridge is stopping and will stay stopped until started again."
+        } else {
+          "Bridge is shutting down."
+        }
+      )
+    }
+  }
+
+  fun markServiceStopped(manualStop: Boolean = _state.value.manualStopActive) {
+    Timber.i("Service stopped (manual_stop=%s)", manualStop)
+    _state.update {
+      it.copy(
+        serviceRunning = false,
+        serviceStopping = false,
+        manualStopActive = manualStop,
+        serviceStopSummary = if (manualStop) "Stopped manually" else "Bridge stopped",
+        serviceStopDetail = if (manualStop) {
+          "Auto start is paused until you start the bridge again."
+        } else {
+          null
+        }
+      )
+    }
   }
 
   fun setListenerState(active: Boolean, port: Int) {
@@ -34,12 +89,14 @@ class BridgeStateRepository {
   }
 
   fun recordRejectedConnection(event: ConnectionEventSnapshot, reason: String) {
+    Timber.w("Rejected connection: %s", event.format(reason))
     _state.update {
       it.copy(lastRejectedReason = event.format(reason))
     }
   }
 
   fun recordDisconnect(event: ConnectionEventSnapshot, reason: String) {
+    Timber.i("Disconnect: %s", event.format(reason))
     _state.update {
       it.copy(
         lastDisconnectReason = event.format(reason),
@@ -93,21 +150,110 @@ class BridgeStateRepository {
   }
 
   fun recordCommand(message: String) {
+    Timber.d("Command: %s", message)
     _state.update { it.copy(recentCommands = addEntry(it.recentCommands, message)) }
   }
 
   fun recordProtocolEvent(message: String) {
+    Timber.d("Protocol: %s", message)
     _state.update { it.copy(recentProtocolEvents = addEntry(it.recentProtocolEvents, message)) }
   }
 
   fun recordPowerampEvent(message: String) {
-    _state.update { it.copy(recentPowerampEvents = addEntry(it.recentPowerampEvents, message)) }
+    if (!message.startsWith("Poweramp action: TPOS_SYNC") &&
+      !message.startsWith("Position sync (TPOS_SYNC):")
+    ) {
+      Timber.d("Poweramp: %s", message)
+    }
+    _state.update { current ->
+      current.copy(recentPowerampEvents = addPowerampEntry(current.recentPowerampEvents, message))
+    }
+  }
+
+  fun recordLatencySample(
+    command: String,
+    dispatchMs: Long,
+    observedMs: Long?,
+    effectStatus: String = if (observedMs == null) "dispatch_only" else "confirmed"
+  ) {
+    val effectiveMs = observedMs ?: dispatchMs
+    Timber.d(
+      "Latency: command=%s dispatch_ms=%d observed_ms=%s status=%s",
+      command,
+      dispatchMs,
+      observedMs?.toString() ?: "unconfirmed",
+      effectStatus
+    )
+    _state.update { current ->
+      val previous = current.latencySummary
+      val sampleCount = previous.sampleCount + 1
+      val totalMs = previous.totalMs + effectiveMs
+      current.copy(
+        latencySummary = previous.copy(
+          lastCommand = command,
+          lastDispatchMs = dispatchMs,
+          lastObservedMs = observedMs,
+          lastEffectStatus = effectStatus,
+          averageMs = totalMs / sampleCount,
+          maxMs = maxOf(previous.maxMs ?: 0L, effectiveMs),
+          sampleCount = sampleCount,
+          totalMs = totalMs
+        )
+      )
+    }
+  }
+
+  fun updateCoverState(coverState: CoverSnapshot) {
+    _state.update { current ->
+      if (current.coverState == coverState) {
+        current
+      } else {
+        current.copy(
+          coverState = coverState,
+          coverSignalRevision = current.coverSignalRevision + 1L
+        )
+      }
+    }
+  }
+
+  fun signalCoverChanged(reason: String) {
+    Timber.d("Cover signal: %s", reason)
+    _state.update { current ->
+      current.copy(coverSignalRevision = current.coverSignalRevision + 1L)
+    }
   }
 
   fun setError(message: String?) {
+    if (message != null) {
+      Timber.e("Bridge error: %s", message)
+    }
     _state.update { it.copy(lastError = message) }
   }
 
   private fun addEntry(existing: List<LogEntry>, message: String): List<LogEntry> =
     (listOf(LogEntry.create(message)) + existing).take(20)
+
+  private fun addPowerampEntry(existing: List<LogEntry>, message: String): List<LogEntry> {
+    if (message.startsWith("Poweramp action: TPOS_SYNC")) {
+      return existing
+    }
+
+    if (message.startsWith("Position sync (TPOS_SYNC):")) {
+      val latest = existing.firstOrNull()
+      val lastPos = message.substringAfterLast(':').trim()
+      if (latest != null && latest.message.startsWith("TPOS_SYNC x ")) {
+        val currentCount = latest.message
+          .substringAfter("TPOS_SYNC x ")
+          .substringBefore(',')
+          .toIntOrNull()
+          ?: 1
+        val replacement = latest.copy(message = "TPOS_SYNC x ${currentCount + 1}, last pos=$lastPos")
+        return listOf(replacement) + existing.drop(1)
+      }
+
+      return addEntry(existing, "TPOS_SYNC x 1, last pos=$lastPos")
+    }
+
+    return addEntry(existing, message)
+  }
 }

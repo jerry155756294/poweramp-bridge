@@ -86,6 +86,37 @@ class ProtocolSessionManagerTest {
   }
 
   @Test
+  fun `request socket auto initializes reconnecting broadcast for same client`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+
+    val waitingSnapshot = manager.connectionDebugSnapshot("broadcast")
+    assertEquals(HandshakeState.AWAITING_INIT, waitingSnapshot?.handshakeState)
+    assertFalse(waitingSnapshot?.broadcastInitialized == true)
+
+    manager.registerConnection("request", "10.0.0.2")
+    manager.processMessage("request", IncomingMessage(ProtocolConstants.Player, "Android"))
+    val requestProtocolResult = manager.processMessage(
+      "request",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to true, "client_id" to "sender-1")
+      )
+    )
+
+    assertTrue(requestProtocolResult.sessionChanged)
+    assertTrue(requestProtocolResult.sessionSnapshot?.broadcastInitialized == true)
+    assertEquals(HandshakeState.READY, manager.connectionDebugSnapshot("broadcast")?.handshakeState)
+  }
+
+  @Test
   fun `verifyconnection is allowed before handshake`() {
     manager.registerConnection("probe", "10.0.0.3")
 
@@ -102,6 +133,7 @@ class ProtocolSessionManagerTest {
       ProtocolConstants.VerifyConnection,
       manager.connectionDebugSnapshot("probe")?.lastIncomingContext
     )
+    assertEquals("probe_socket_completed", manager.inferCloseCategory("probe"))
   }
 
   @Test
@@ -189,6 +221,12 @@ class ProtocolSessionManagerTest {
     assertTrue(replacement.sessionChanged)
     assertTrue(replacement.sessionSnapshot?.broadcastSocketConnected == true)
     assertFalse(replacement.sessionSnapshot?.broadcastInitialized == true)
+    assertEquals(
+      "broadcast_replaced_by_same_client",
+      manager.apply {
+        markDisconnectCategory("broadcast-old", "broadcast_replaced_by_same_client")
+      }.inferCloseCategory("broadcast-old")
+    )
   }
 
   @Test
@@ -229,6 +267,67 @@ class ProtocolSessionManagerTest {
       "protocol_violation_before_init",
       prematureCommand.disconnectCategory
     )
+  }
+
+  @Test
+  fun `request socket close is classified after command`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Init, null))
+
+    manager.registerConnection("request", "10.0.0.2")
+    manager.processMessage("request", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "request",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to true, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("request", IncomingMessage(ProtocolConstants.PlayerStatus, null))
+
+    assertEquals("request_socket_peer_closed_after_command", manager.inferCloseCategory("request"))
+  }
+
+  @Test
+  fun `request socket close is classified as completed without extra command`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Init, null))
+
+    manager.registerConnection("request", "10.0.0.2")
+    manager.processMessage("request", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "request",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to true, "client_id" to "sender-1")
+      )
+    )
+
+    assertEquals("request_socket_completed", manager.inferCloseCategory("request"))
+  }
+
+  @Test
+  fun `broadcast socket close is classified during handshake`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+
+    assertEquals("broadcast_peer_closed_during_handshake", manager.inferCloseCategory("broadcast"))
   }
 
   @Test

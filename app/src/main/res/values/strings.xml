@@ -4,6 +4,8 @@
   <string name="bridge_channel_description">提供 MBRC 連到 Poweramp 的 TCP 橋接服務</string>
   <string name="bridge_notification_title">Poweramp Bridge 執行中</string>
   <string name="bridge_notification_stopped">Poweramp Bridge 已停止</string>
+  <string name="notification_minimal_summary">Bridge service active</string>
+  <string name="notification_minimal_subtext">Notification debug mode keeps this foreground notification stable.</string>
   <string name="notification_no_track">目前沒有播放中的曲目</string>
   <string name="notification_stop">停止</string>
   <string name="notification_restart">重新啟動</string>
