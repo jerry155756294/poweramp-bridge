@@ -82,7 +82,6 @@ class MbrcProtocolAdapterTest {
   @Test
   fun `unsupported library play actions return sender safe noop`() {
     val contexts = listOf(
-      ProtocolConstants.PlaylistPlay,
       ProtocolConstants.LibraryPlayAll,
       "libraryplay",
       "librarytrackplay"
@@ -97,6 +96,15 @@ class MbrcProtocolAdapterTest {
       assertFalse(data.getBoolean("accepted"))
       assertTrue(data.getBoolean("unsupported"))
     }
+  }
+
+  @Test
+  fun `playlistplay without a path returns commandunavailable`() {
+    val reply = adapter.handleCommand(IncomingMessage(ProtocolConstants.PlaylistPlay, mapOf("id" to 42))).single()
+    val json = JSONObject(reply)
+
+    assertEquals(ProtocolConstants.CommandUnavailable, json.getString("context"))
+    assertEquals(ProtocolConstants.PlaylistPlay, json.getString("data"))
   }
 
   @Test

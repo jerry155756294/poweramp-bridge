@@ -83,7 +83,7 @@ class PowerampBroadcastDiagnosticsTest {
     }
 
     assertEquals(
-      "[position:Integer,track:Bundle[durMs:Integer,title:String]]",
+      "[pos:Integer,track:Bundle[durMs:Integer,title:String]]",
       PowerampBroadcastDiagnostics.describeExtras(extras)
     )
   }
