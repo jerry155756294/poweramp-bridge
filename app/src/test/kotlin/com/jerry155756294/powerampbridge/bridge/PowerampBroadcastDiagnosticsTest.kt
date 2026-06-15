@@ -5,7 +5,10 @@ import com.maxmpz.poweramp.player.PowerampAPI
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
 class PowerampBroadcastDiagnosticsTest {
   @Test
   fun `extract duration prefers long duration ms`() {
