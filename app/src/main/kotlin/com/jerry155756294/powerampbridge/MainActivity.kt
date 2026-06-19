@@ -6,38 +6,52 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.BugReport
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.Divider
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.jerry155756294.powerampbridge.bridge.BridgeService
@@ -86,7 +100,7 @@ private fun BridgeApp(
 ) {
   val uiState by state.collectAsStateWithLifecycle()
   val settings by settingsRepository.settings.collectAsStateWithLifecycle(initialValue = BridgeSettings())
-  var selectedTab by remember { mutableIntStateOf(0) }
+  var selectedDestination by remember { mutableStateOf(BridgeDestination.Settings) }
 
   LaunchedEffect(settings.autoStart, uiState.serviceRunning, uiState.serviceStopping, uiState.manualStopActive) {
     if (uiState.shouldAutoStart(settings.autoStart)) {
@@ -94,27 +108,97 @@ private fun BridgeApp(
     }
   }
 
-  Scaffold { padding ->
-    Column(
+  Scaffold(
+    containerColor = MaterialTheme.colorScheme.background,
+    bottomBar = {
+      BottomNavigationBar(
+        selectedDestination = selectedDestination,
+        onSelectDestination = { selectedDestination = it }
+      )
+    }
+  ) { padding ->
+    when (selectedDestination) {
+      BridgeDestination.Settings -> SettingsTab(
+        uiState = uiState,
+        settings = settings,
+        onStart = onStart,
+        onStop = onStop,
+        repository = settingsRepository,
+        modifier = Modifier.padding(padding)
+      )
+      BridgeDestination.Status -> StatusTab(
+        uiState = uiState,
+        advancedMode = settings.advancedDiagnosticsEnabled,
+        modifier = Modifier.padding(padding)
+      )
+      BridgeDestination.Debug -> DebugTab(
+        uiState = uiState,
+        advancedMode = settings.advancedDiagnosticsEnabled,
+        modifier = Modifier.padding(padding)
+      )
+    }
+  }
+}
+
+private enum class BridgeDestination(
+  val title: String,
+  val subtitle: String,
+  val icon: ImageVector
+) {
+  Settings(
+    title = "Controls",
+    subtitle = "Tune startup, networking, and service behavior.",
+    icon = Icons.Rounded.Settings
+  ),
+  Status(
+    title = "Live Status",
+    subtitle = "Track the bridge, sender session, and Poweramp state.",
+    icon = Icons.Rounded.Tune
+  ),
+  Debug(
+    title = "Diagnostics",
+    subtitle = "Inspect recent protocol, command, and Poweramp events.",
+    icon = Icons.Rounded.BugReport
+  )
+}
+
+@Composable
+private fun BottomNavigationBar(
+  selectedDestination: BridgeDestination,
+  onSelectDestination: (BridgeDestination) -> Unit
+) {
+  Surface(
+    color = MaterialTheme.colorScheme.background,
+    tonalElevation = 0.dp,
+    modifier = Modifier.navigationBarsPadding()
+  ) {
+    Card(
       modifier = Modifier
-        .fillMaxSize()
-        .background(MaterialTheme.colorScheme.background)
-        .padding(padding)
+        .fillMaxWidth()
+        .padding(horizontal = 16.dp, vertical = 12.dp),
+      shape = MaterialTheme.shapes.extraLarge,
+      colors = CardDefaults.cardColors(
+        containerColor = MaterialTheme.colorScheme.surface
+      ),
+      elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
     ) {
-      TabRow(selectedTabIndex = selectedTab) {
-        listOf("Settings", "Status", "Debug").forEachIndexed { index, title ->
-          Tab(
-            selected = selectedTab == index,
-            onClick = { selectedTab = index },
-            text = { Text(title) }
+      NavigationBar(
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp
+      ) {
+        BridgeDestination.entries.forEach { destination ->
+          NavigationBarItem(
+            selected = selectedDestination == destination,
+            onClick = { onSelectDestination(destination) },
+            icon = {
+              androidx.compose.material3.Icon(
+                imageVector = destination.icon,
+                contentDescription = destination.title
+              )
+            },
+            label = { Text(destination.title) }
           )
         }
-      }
-
-      when (selectedTab) {
-        0 -> SettingsTab(uiState, settings, onStart, onStop, settingsRepository)
-        1 -> StatusTab(uiState, settings.advancedDiagnosticsEnabled)
-        else -> DebugTab(uiState, settings.advancedDiagnosticsEnabled)
       }
     }
   }
@@ -126,18 +210,25 @@ private fun SettingsTab(
   settings: BridgeSettings,
   onStart: () -> Unit,
   onStop: () -> Unit,
-  repository: BridgeSettingsRepository
+  repository: BridgeSettingsRepository,
+  modifier: Modifier = Modifier
 ) {
   val scope = rememberCoroutineScope()
   var portText by remember(settings.port) { mutableStateOf(settings.port.toString()) }
 
   Column(
-    modifier = Modifier
+    modifier = modifier
       .fillMaxSize()
       .verticalScroll(rememberScrollState())
-      .padding(16.dp),
-    verticalArrangement = Arrangement.spacedBy(12.dp)
+      .padding(horizontal = 16.dp, vertical = 20.dp),
+    verticalArrangement = Arrangement.spacedBy(16.dp)
   ) {
+    ScreenHero(
+      destination = BridgeDestination.Settings,
+      accent = "TCP ${settings.port}",
+      summary = if (uiState.listenerActive) "Listener ready for LAN or Tailscale control." else "Bridge is idle until you start the service."
+    )
+
     SectionCard("Network") {
       OutlinedTextField(
         value = portText,
@@ -149,7 +240,14 @@ private fun SettingsTab(
         },
         label = { Text("TCP Port") },
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = OutlinedTextFieldDefaults.colors(
+          focusedContainerColor = MaterialTheme.colorScheme.surface,
+          unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+          focusedBorderColor = MaterialTheme.colorScheme.primary,
+          unfocusedBorderColor = MaterialTheme.colorScheme.outline
+        )
       )
       Text(
         text = "Use this LAN/Tailscale address and port from your MBRC sender.",
@@ -199,10 +297,11 @@ private fun SettingsTab(
       }
     }
 
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-      Button(onClick = onStart) { Text("Start Bridge") }
-      Button(onClick = onStop) { Text("Stop Bridge") }
-    }
+    ServiceActionRow(
+      serviceRunning = uiState.serviceRunning,
+      onStart = onStart,
+      onStop = onStop
+    )
 
     uiState.serviceStopSummary?.let { summary ->
       SectionCard("Stop State") {
@@ -214,14 +313,26 @@ private fun SettingsTab(
 }
 
 @Composable
-private fun StatusTab(uiState: BridgeUiState, advancedMode: Boolean) {
+private fun StatusTab(
+  uiState: BridgeUiState,
+  advancedMode: Boolean,
+  modifier: Modifier = Modifier
+) {
   Column(
-    modifier = Modifier
+    modifier = modifier
       .fillMaxSize()
       .verticalScroll(rememberScrollState())
-      .padding(16.dp),
-    verticalArrangement = Arrangement.spacedBy(12.dp)
+      .padding(horizontal = 16.dp, vertical = 20.dp),
+    verticalArrangement = Arrangement.spacedBy(16.dp)
   ) {
+    ScreenHero(
+      destination = BridgeDestination.Status,
+      accent = uiState.serviceStatusLabel(),
+      summary = uiState.activeClient?.let { "Connected to $it" } ?: "No sender is currently attached."
+    )
+
+    StatusHighlights(uiState)
+
     SectionCard("Bridge") {
       StatusLine("Service", uiState.serviceStatusLabel())
       StatusLine("Listener", if (uiState.listenerActive) "TCP ${uiState.listenPort}" else "Offline")
@@ -277,14 +388,24 @@ private fun StatusTab(uiState: BridgeUiState, advancedMode: Boolean) {
 }
 
 @Composable
-private fun DebugTab(uiState: BridgeUiState, advancedMode: Boolean) {
+private fun DebugTab(
+  uiState: BridgeUiState,
+  advancedMode: Boolean,
+  modifier: Modifier = Modifier
+) {
   Column(
-    modifier = Modifier
+    modifier = modifier
       .fillMaxSize()
       .verticalScroll(rememberScrollState())
-      .padding(16.dp),
-    verticalArrangement = Arrangement.spacedBy(12.dp)
+      .padding(horizontal = 16.dp, vertical = 20.dp),
+    verticalArrangement = Arrangement.spacedBy(16.dp)
   ) {
+    ScreenHero(
+      destination = BridgeDestination.Debug,
+      accent = if (advancedMode) "Advanced mode" else "Simple mode",
+      summary = uiState.lastError ?: "No active bridge errors recorded."
+    )
+
     SectionCard("Last Error") {
       Text(uiState.lastError ?: "No error recorded.")
     }
@@ -299,6 +420,151 @@ private fun DebugTab(uiState: BridgeUiState, advancedMode: Boolean) {
 
     SectionCard("Poweramp Events") {
       EventList(uiState.recentPowerampEvents, true)
+    }
+  }
+}
+
+@Composable
+private fun ScreenHero(
+  destination: BridgeDestination,
+  accent: String,
+  summary: String
+) {
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    shape = MaterialTheme.shapes.extraLarge,
+    colors = CardDefaults.cardColors(
+      containerColor = MaterialTheme.colorScheme.primaryContainer
+    )
+  ) {
+    Column(
+      modifier = Modifier
+        .fillMaxWidth()
+        .padding(20.dp),
+      verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Column(
+          modifier = Modifier.weight(1f),
+          verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+          Text(
+            text = "Poweramp Bridge",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.78f)
+          )
+          Text(
+            text = destination.title,
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onPrimaryContainer
+          )
+        }
+        Surface(
+          shape = MaterialTheme.shapes.large,
+          color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.1f)
+        ) {
+          Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            androidx.compose.material3.Icon(
+              imageVector = destination.icon,
+              contentDescription = null,
+              tint = MaterialTheme.colorScheme.onPrimaryContainer,
+              modifier = Modifier.size(24.dp)
+            )
+          }
+        }
+      }
+      Text(
+        text = destination.subtitle,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.82f)
+      )
+      Surface(
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.78f)
+      ) {
+        Text(
+          text = "$accent | $summary",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurface,
+          modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+        )
+      }
+    }
+  }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun StatusHighlights(uiState: BridgeUiState) {
+  FlowRow(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.spacedBy(12.dp),
+    verticalArrangement = Arrangement.spacedBy(12.dp)
+  ) {
+    HighlightChip("Listener", if (uiState.listenerActive) "Online" else "Offline")
+    HighlightChip("Client", uiState.activeClient ?: "None")
+    HighlightChip("Playback", uiState.playback.state)
+    HighlightChip("Position Sync", if (uiState.positionSyncActive) "Active" else "Idle")
+  }
+}
+
+@Composable
+private fun HighlightChip(label: String, value: String) {
+  Surface(
+    shape = MaterialTheme.shapes.large,
+    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.78f)
+  ) {
+    Column(
+      modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+      verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+      Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+      )
+      Text(
+        text = value,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.SemiBold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis
+      )
+    }
+  }
+}
+
+@Composable
+private fun ServiceActionRow(
+  serviceRunning: Boolean,
+  onStart: () -> Unit,
+  onStop: () -> Unit
+) {
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.spacedBy(12.dp)
+  ) {
+    Button(
+      onClick = onStart,
+      modifier = Modifier.weight(1f),
+      shape = MaterialTheme.shapes.large,
+      colors = ButtonDefaults.buttonColors(
+        containerColor = MaterialTheme.colorScheme.primary
+      )
+    ) {
+      Text(if (serviceRunning) "Restart Bridge" else "Start Bridge")
+    }
+    TextButton(
+      onClick = onStop,
+      modifier = Modifier.weight(1f),
+      shape = MaterialTheme.shapes.large
+    ) {
+      Text("Stop Bridge")
     }
   }
 }
@@ -320,19 +586,26 @@ private fun SectionCard(
   title: String,
   content: @Composable () -> Unit
 ) {
-  Card(modifier = Modifier.fillMaxWidth()) {
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    shape = MaterialTheme.shapes.extraLarge,
+    colors = CardDefaults.cardColors(
+      containerColor = MaterialTheme.colorScheme.surface
+    ),
+    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+  ) {
     Column(
       modifier = Modifier
         .fillMaxWidth()
-        .padding(16.dp),
-      verticalArrangement = Arrangement.spacedBy(10.dp)
+        .padding(18.dp),
+      verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
       Text(
         text = title,
         style = MaterialTheme.typography.titleMedium,
         fontWeight = FontWeight.SemiBold
       )
-      Divider()
+      HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f))
       content()
     }
   }
@@ -346,9 +619,10 @@ private fun SettingSwitch(
 ) {
   Row(
     modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = Arrangement.SpaceBetween
+    horizontalArrangement = Arrangement.SpaceBetween,
+    verticalAlignment = Alignment.CenterVertically
   ) {
-    Text(label, modifier = Modifier.weight(1f))
+    Text(label, modifier = Modifier.weight(1f).padding(end = 12.dp))
     Switch(checked = checked, onCheckedChange = onCheckedChange)
   }
 }
