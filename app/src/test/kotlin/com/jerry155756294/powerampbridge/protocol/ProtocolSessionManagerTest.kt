@@ -190,7 +190,8 @@ class ProtocolSessionManagerTest {
     assertTrue(result.replies.isEmpty())
     assertNull(result.delegateMessage)
     assertFalse(result.disconnect)
-    assertEquals(0, manager.connectionDebugSnapshot("request")?.readyMessageCount)
+    assertEquals(ProtocolConstants.Pong, manager.connectionDebugSnapshot("request")?.lastIncomingContext)
+    assertEquals(HandshakeState.READY, manager.connectionDebugSnapshot("request")?.handshakeState)
   }
 
   @Test
