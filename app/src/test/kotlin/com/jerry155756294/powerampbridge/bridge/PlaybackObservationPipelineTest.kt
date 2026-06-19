@@ -71,7 +71,6 @@ class PlaybackObservationPipelineTest {
       ),
       nowMs = 2_150L
     )
-
     val result = pipeline.onPlaybackObserved(
       previous = playingState(),
       current = pausedState(),
@@ -100,7 +99,6 @@ class PlaybackObservationPipelineTest {
       ),
       nowMs = 3_100L
     )
-
     val result = pipeline.onPlaybackObserved(
       previous = playingState(),
       current = pausedState(),
@@ -179,6 +177,47 @@ class PlaybackObservationPipelineTest {
     )
 
     assertEquals("paused", projection.state.playback.state)
+  }
+
+  @Test
+  fun `command override takes priority over paused hold`() {
+    pipeline.onCommandResult(
+      CommandPipelineResult(
+        replies = emptyList(),
+        intent = PlaybackCommandIntent.PLAY,
+        executed = true
+      ),
+      nowMs = 9_000L
+    )
+
+    val projection = pipeline.senderFacingState(
+      observed = pausedState().copy(
+        senderPlaybackOverride = SenderPlaybackOverride(
+          state = "paused",
+          reason = "command_ack_pause",
+          expiresAtElapsedRealtimeMs = 10_500L
+        )
+      ),
+      nowMs = 9_100L
+    )
+
+    assertEquals("paused", projection.state.playback.state)
+  }
+
+  @Test
+  fun `expired command override falls back to observed state`() {
+    val projection = pipeline.senderFacingState(
+      observed = playingState().copy(
+        senderPlaybackOverride = SenderPlaybackOverride(
+          state = "paused",
+          reason = "command_ack_pause",
+          expiresAtElapsedRealtimeMs = 10_500L
+        )
+      ),
+      nowMs = 10_501L
+    )
+
+    assertEquals("playing", projection.state.playback.state)
   }
 
   private fun playingState(): BridgeUiState =

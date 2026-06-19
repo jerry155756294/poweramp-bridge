@@ -22,33 +22,28 @@ internal data class CommandPipelineResult(
   val replies: List<String>,
   val intent: PlaybackCommandIntent,
   val executed: Boolean,
+  val optimisticPlaybackState: String? = null,
   val suppressedSenderPause: Boolean = false,
   val protocolEvents: List<String> = emptyList(),
   val powerampEvents: List<String> = emptyList()
 )
 
 internal class PlaybackCommandPipeline(
-  private val adapter: MbrcProtocolAdapter,
-  private val guard: PlaybackCommandGuard = PlaybackCommandGuard()
+  private val adapter: MbrcProtocolAdapter
 ) {
-  fun handle(message: IncomingMessage, nowMs: Long): CommandPipelineResult {
+  fun handle(
+    message: IncomingMessage,
+    nowMs: Long,
+    currentPlaybackState: String? = null
+  ): CommandPipelineResult {
     val intent = intentFor(message)
-    if (guard.shouldSuppress(message, nowMs)) {
-      return CommandPipelineResult(
-        replies = emptyList(),
-        intent = intent,
-        executed = false,
-        suppressedSenderPause = true,
-        protocolEvents = listOf(
-          "command_pipeline:suppress_pause_echo",
-          "suppressed_echo_pause:${message.context}"
-        ),
-        powerampEvents = listOf("Suppressed echo pause within playback guard window")
-      )
-    }
-
-    guard.recordIncomingCommand(message, nowMs)
     val replies = adapter.handleCommand(message)
+    val executed = commandExecuted(intent, replies)
+    val optimisticPlaybackState = if (executed) {
+      optimisticStateFor(intent, currentPlaybackState)
+    } else {
+      null
+    }
     val protocolEvents = when (intent) {
       PlaybackCommandIntent.PLAY -> listOf("command_pipeline:dispatch_play")
       PlaybackCommandIntent.PLAY_PAUSE -> listOf("command_pipeline:dispatch_playpause")
@@ -66,13 +61,10 @@ internal class PlaybackCommandPipeline(
     return CommandPipelineResult(
       replies = replies,
       intent = intent,
-      executed = true,
+      executed = executed,
+      optimisticPlaybackState = optimisticPlaybackState,
       protocolEvents = protocolEvents
     )
-  }
-
-  fun onPlaybackStateObserved(state: String, nowMs: Long) {
-    guard.recordPlaybackState(state, nowMs)
   }
 
   private fun intentFor(message: IncomingMessage): PlaybackCommandIntent = when (message.context) {
@@ -87,5 +79,25 @@ internal class PlaybackCommandPipeline(
     ProtocolConstants.PlayerShuffle -> PlaybackCommandIntent.SHUFFLE
     ProtocolConstants.PlayerRepeat -> PlaybackCommandIntent.REPEAT
     else -> PlaybackCommandIntent.OTHER
+  }
+
+  private fun commandExecuted(intent: PlaybackCommandIntent, replies: List<String>): Boolean =
+    when (intent) {
+      PlaybackCommandIntent.PLAY,
+      PlaybackCommandIntent.PLAY_PAUSE,
+      PlaybackCommandIntent.PAUSE,
+      PlaybackCommandIntent.STOP -> replies.isEmpty()
+      else -> true
+    }
+
+  private fun optimisticStateFor(
+    intent: PlaybackCommandIntent,
+    currentPlaybackState: String?
+  ): String? = when (intent) {
+    PlaybackCommandIntent.PLAY -> "playing"
+    PlaybackCommandIntent.PAUSE,
+    PlaybackCommandIntent.STOP -> "paused"
+    PlaybackCommandIntent.PLAY_PAUSE -> if (currentPlaybackState == "playing") "paused" else "playing"
+    else -> null
   }
 }

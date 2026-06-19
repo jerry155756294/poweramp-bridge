@@ -6,6 +6,7 @@ import com.jerry155756294.powerampbridge.protocol.MbrcProtocolAdapter
 import com.jerry155756294.powerampbridge.protocol.ProtocolConstants
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,43 +17,47 @@ class PlaybackCommandPipelineTest {
   private val pipeline = PlaybackCommandPipeline(adapter)
 
   @Test
-  fun `playerpause is suppressed shortly after play`() {
+  fun `playerpause is dispatched immediately after play`() {
     pipeline.handle(IncomingMessage(ProtocolConstants.PlayerPlay, null), nowMs = 1_000L)
 
     val result = pipeline.handle(IncomingMessage(ProtocolConstants.PlayerPause, null), nowMs = 1_200L)
 
-    assertTrue(result.suppressedSenderPause)
-    assertFalse(result.executed)
-    assertTrue(result.protocolEvents.contains("command_pipeline:suppress_pause_echo"))
-    assertEquals(0, controller.pauseCalls)
-  }
-
-  @Test
-  fun `pause outside suppression window is dispatched`() {
-    pipeline.handle(IncomingMessage(ProtocolConstants.PlayerPlay, null), nowMs = 1_000L)
-
-    val result = pipeline.handle(IncomingMessage(ProtocolConstants.PlayerPause, null), nowMs = 2_000L)
-
-    assertFalse(result.suppressedSenderPause)
     assertTrue(result.executed)
+    assertEquals("paused", result.optimisticPlaybackState)
     assertTrue(result.protocolEvents.contains("command_pipeline:dispatch_pause"))
     assertEquals(1, controller.pauseCalls)
   }
 
   @Test
   fun `playpause dispatch remains unaffected`() {
-    val result = pipeline.handle(IncomingMessage(ProtocolConstants.PlayerPlayPause, null), nowMs = 5_000L)
+    val result = pipeline.handle(
+      IncomingMessage(ProtocolConstants.PlayerPlayPause, null),
+      nowMs = 5_000L,
+      currentPlaybackState = "playing"
+    )
 
     assertTrue(result.executed)
     assertEquals(PlaybackCommandIntent.PLAY_PAUSE, result.intent)
+    assertEquals("paused", result.optimisticPlaybackState)
     assertTrue(result.protocolEvents.contains("command_pipeline:dispatch_playpause"))
     assertEquals(1, controller.playPauseCalls)
+  }
+
+  @Test
+  fun `failed transport command does not create optimistic state`() {
+    controller.pauseSucceeds = false
+
+    val result = pipeline.handle(IncomingMessage(ProtocolConstants.PlayerPause, null), nowMs = 5_000L)
+
+    assertFalse(result.executed)
+    assertNull(result.optimisticPlaybackState)
   }
 
   private class FakePowerampController : PowerampController {
     var playPauseCalls = 0
     var playCalls = 0
     var pauseCalls = 0
+    var pauseSucceeds = true
 
     override fun currentCoverStatus(): Int = 404
     override fun currentCoverPayload(): Map<String, Any?> = emptyMap()
@@ -68,7 +73,7 @@ class PlaybackCommandPipelineTest {
     }
     override fun pause(): Boolean {
       pauseCalls += 1
-      return true
+      return pauseSucceeds
     }
     override fun stopPlayback(): Boolean = true
     override fun next(): Boolean = true

@@ -53,6 +53,7 @@ class BridgeService : Service() {
   private var lastCoverSignalRevision: Long? = null
   private var pendingLatencyMeasurement: PendingLatencyMeasurement? = null
   private var latencyTimeoutJob: Job? = null
+  private var commandAckJob: Job? = null
   private var lastObservedState: BridgeUiState? = null
   private var stopJob: Job? = null
   private var manualStopRequested = false
@@ -107,10 +108,18 @@ class BridgeService : Service() {
         }
         val observedAt = SystemClock.elapsedRealtime()
         val startedAt = SystemClock.elapsedRealtime()
-        val result = commandPipeline.handle(message, observedAt)
+        stateRepository.recordProtocolEvent("command_received:${message.context}")
+        val result = commandPipeline.handle(
+          message = message,
+          nowMs = observedAt,
+          currentPlaybackState = stateRepository.state.value.playback.state
+        )
         result.protocolEvents.forEach(stateRepository::recordProtocolEvent)
         result.powerampEvents.forEach(stateRepository::recordPowerampEvent)
         observationPipeline.onCommandResult(result, observedAt)
+        result.optimisticPlaybackState?.let { optimisticState ->
+          applyOptimisticPlaybackAck(result.intent, optimisticState, observedAt)
+        }
         val replies = result.replies
         val dispatchMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
         if (result.executed) {
@@ -277,8 +286,6 @@ class BridgeService : Service() {
           }
         }
         lastObservedState = state
-        commandPipeline.onPlaybackStateObserved(state.playback.state, nowMs)
-
         val notificationSnapshot = notificationPresenter.snapshot(state)
         if (notificationSnapshot != lastNotificationSnapshot) {
           lastNotificationSnapshot = notificationSnapshot
@@ -307,8 +314,9 @@ class BridgeService : Service() {
             ) ||
             state.coverSignalRevision != lastCoverSignalRevision
 
+        val statusChanged = statusPayload != lastStatusBroadcastPayload
         val messages = buildList {
-          if (statusPayload != lastStatusBroadcastPayload) {
+          if (statusChanged) {
             addAll(statusPayload)
           }
           if (lastBroadcastPositionMs != senderState.playback.track.positionMs) {
@@ -320,6 +328,7 @@ class BridgeService : Service() {
         }
 
         if (messages.isNotEmpty()) {
+          val senderOverride = state.senderPlaybackOverride
           lastStatusBroadcastPayload = statusPayload
           lastBroadcastPositionMs = senderState.playback.track.positionMs
           if (shouldSendCoverSignal) {
@@ -328,6 +337,11 @@ class BridgeService : Service() {
           }
           launch(Dispatchers.IO) {
             server.sendBroadcast(messages)
+            if (statusChanged && senderOverride != null) {
+              app.appContainer.stateRepository.recordProtocolEvent(
+                "sender_status_sent:${senderState.playback.state} reason=${senderOverride.reason}"
+              )
+            }
           }
         }
       }
@@ -411,6 +425,33 @@ class BridgeService : Service() {
     keepaliveJob = null
   }
 
+  private fun applyOptimisticPlaybackAck(
+    intent: PlaybackCommandIntent,
+    state: String,
+    nowMs: Long
+  ) {
+    val reason = when (intent) {
+      PlaybackCommandIntent.PLAY -> "command_ack_play"
+      PlaybackCommandIntent.PLAY_PAUSE -> "command_ack_playpause"
+      PlaybackCommandIntent.PAUSE -> "command_ack_pause"
+      PlaybackCommandIntent.STOP -> "command_ack_stop"
+      else -> return
+    }
+    val repository = app.appContainer.stateRepository
+    val expiresAt = nowMs + COMMAND_ACK_TTL_MS
+    repository.recordProtocolEvent(
+      "sender_state_override:$state reason=$reason ttl=$COMMAND_ACK_TTL_MS"
+    )
+    repository.overrideSenderPlaybackState(state, reason, expiresAt)
+
+    commandAckJob?.cancel()
+    commandAckJob = scope.launch {
+      delay(COMMAND_ACK_TTL_MS)
+      repository.clearSenderPlaybackOverride(reason)
+      repository.recordProtocolEvent("sender_state_override_expired:$state reason=$reason")
+    }
+  }
+
   private fun beginServiceStop(manualStop: Boolean) {
     if (manualStop) {
       manualStopRequested = true
@@ -441,6 +482,10 @@ class BridgeService : Service() {
     settingsJob?.cancel()
     stateJob?.cancel()
     latencyTimeoutJob?.cancel()
+    commandAckJob?.cancel()
+    if (::app.isInitialized) {
+      app.appContainer.stateRepository.clearSenderPlaybackOverride()
+    }
     pendingLatencyMeasurement = null
     stopPositionTicker()
     stopKeepaliveLoop()
@@ -624,6 +669,7 @@ class BridgeService : Service() {
     private const val POSITION_TICK_MS = 1000L
     private const val POSITION_RESYNC_INTERVAL = 5
     private const val BROADCAST_KEEPALIVE_CHECK_MS = 5_000L
+    private const val COMMAND_ACK_TTL_MS = 1_500L
     private const val LATENCY_CONFIRMATION_TIMEOUT_MS = 1500L
     private const val SLOW_REQUEST_MS = 250L
     private const val VERY_SLOW_REQUEST_MS = 1000L

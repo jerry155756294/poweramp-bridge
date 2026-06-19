@@ -124,6 +124,38 @@ class BridgeStateRepository {
     }
   }
 
+  fun overrideSenderPlaybackState(
+    state: String,
+    reason: String,
+    expiresAtElapsedRealtimeMs: Long
+  ) {
+    Timber.d(
+      "Sender state override: state=%s reason=%s expires_at=%d",
+      state,
+      reason,
+      expiresAtElapsedRealtimeMs
+    )
+    _state.update { current ->
+      current.copy(
+        senderPlaybackOverride = SenderPlaybackOverride(
+          state = state,
+          reason = reason,
+          expiresAtElapsedRealtimeMs = expiresAtElapsedRealtimeMs
+        )
+      )
+    }
+  }
+
+  fun clearSenderPlaybackOverride(reason: String? = null) {
+    _state.update { current ->
+      val active = current.senderPlaybackOverride ?: return@update current
+      if (reason != null && active.reason != reason) {
+        return@update current
+      }
+      current.copy(senderPlaybackOverride = null)
+    }
+  }
+
   fun tickPlaybackPosition(stepMs: Long) {
     _state.update { current ->
       if (current.playback.state != "playing") {
