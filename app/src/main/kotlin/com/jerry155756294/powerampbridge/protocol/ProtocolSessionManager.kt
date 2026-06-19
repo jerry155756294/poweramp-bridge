@@ -217,10 +217,6 @@ class ProtocolSessionManager(
       HandshakeState.READY
     }
 
-    if (attach.clientInfo.role == SocketRole.REQUEST) {
-      promoteAwaitingBroadcastForActiveClient()
-    }
-
     return ProtocolEngineResult(
       replies = listOf(OutgoingMessage(ProtocolConstants.Protocol, serverProtocolVersion)),
       socketsToClose = attach.replacedSocketIds,
@@ -257,23 +253,6 @@ class ProtocolSessionManager(
       delegateMessage = message,
       clientInfo = connection.toClientInfo()
     )
-  }
-
-  private fun promoteAwaitingBroadcastForActiveClient(): Boolean {
-    val session = logicalClient ?: return false
-    val broadcastSocketId = session.broadcastSocketId ?: return false
-    if (session.broadcastInitialized) {
-      return false
-    }
-
-    val broadcastConnection = connections[broadcastSocketId] ?: return false
-    if (broadcastConnection.handshakeState != HandshakeState.AWAITING_INIT) {
-      return false
-    }
-
-    broadcastConnection.handshakeState = HandshakeState.READY
-    logicalClient = session.copy(broadcastInitialized = true)
-    return true
   }
 
   private fun attachToLogicalClient(
