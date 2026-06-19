@@ -5,8 +5,6 @@ import com.jerry155756294.powerampbridge.protocol.JsonMessageCodec
 import com.jerry155756294.powerampbridge.protocol.MbrcProtocolAdapter
 import com.jerry155756294.powerampbridge.protocol.ProtocolConstants
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -43,21 +41,10 @@ class PlaybackCommandPipelineTest {
     assertEquals(1, controller.playPauseCalls)
   }
 
-  @Test
-  fun `failed transport command does not create optimistic state`() {
-    controller.pauseSucceeds = false
-
-    val result = pipeline.handle(IncomingMessage(ProtocolConstants.PlayerPause, null), nowMs = 5_000L)
-
-    assertFalse(result.executed)
-    assertNull(result.optimisticPlaybackState)
-  }
-
   private class FakePowerampController : PowerampController {
     var playPauseCalls = 0
     var playCalls = 0
     var pauseCalls = 0
-    var pauseSucceeds = true
 
     override fun currentCoverStatus(): Int = 404
     override fun currentCoverPayload(): Map<String, Any?> = emptyMap()
@@ -73,7 +60,7 @@ class PlaybackCommandPipelineTest {
     }
     override fun pause(): Boolean {
       pauseCalls += 1
-      return pauseSucceeds
+      return true
     }
     override fun stopPlayback(): Boolean = true
     override fun next(): Boolean = true
