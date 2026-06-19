@@ -44,6 +44,7 @@ class BridgeService : Service() {
   private var settingsJob: Job? = null
   private var stateJob: Job? = null
   private var positionSyncJob: Job? = null
+  private var keepaliveJob: Job? = null
   private var activeSettings = BridgeSettings()
   private var startedPort: Int? = null
   private var lastStatusBroadcastPayload: List<String>? = null
@@ -57,6 +58,7 @@ class BridgeService : Service() {
   private var manualStopRequested = false
   private var stopCompleted = false
   private var lastNotificationSnapshot: NotificationSnapshot? = null
+  private val broadcastKeepaliveTracker = BroadcastKeepaliveTracker(clock = System::currentTimeMillis)
   private lateinit var notificationPresenter: BridgeNotificationPresenter
   private lateinit var commandPipeline: PlaybackCommandPipeline
   private lateinit var observationPipeline: PlaybackObservationPipeline
@@ -147,6 +149,8 @@ class BridgeService : Service() {
         stateRepository.updateSession(snapshot)
         if (snapshot?.broadcastInitialized != true) {
           stopPositionTicker()
+          stopKeepaliveLoop()
+          broadcastKeepaliveTracker.clear()
           lastStatusBroadcastPayload = null
           lastBroadcastPositionMs = null
           lastCoverSignalTrackId = null
@@ -156,6 +160,12 @@ class BridgeService : Service() {
 
       override suspend fun onProbe(remoteAddress: String) {
         stateRepository.recordProbe(remoteAddress)
+      }
+
+      override suspend fun onBroadcastTraffic(contexts: List<String>) {
+        if (contexts.isNotEmpty()) {
+          broadcastKeepaliveTracker.recordActivity()
+        }
       }
 
       override suspend fun onProtocolEvent(message: String) {
@@ -276,6 +286,7 @@ class BridgeService : Service() {
           manager.notify(NOTIFICATION_ID, notificationPresenter.build(state))
         }
         syncPositionTicker(state)
+        syncKeepaliveLoop(state)
 
         if (!state.broadcastInitialized) {
           return@collectLatest
@@ -364,6 +375,42 @@ class BridgeService : Service() {
     app.appContainer.stateRepository.setPositionSyncActive(false)
   }
 
+  private fun syncKeepaliveLoop(state: BridgeUiState) {
+    if (!state.broadcastInitialized) {
+      stopKeepaliveLoop()
+      return
+    }
+
+    if (keepaliveJob?.isActive == true) {
+      return
+    }
+
+    keepaliveJob = scope.launch(Dispatchers.IO) {
+      while (true) {
+        delay(BROADCAST_KEEPALIVE_CHECK_MS)
+        val current = app.appContainer.stateRepository.state.value
+        if (!current.broadcastInitialized) {
+          break
+        }
+
+        val nowMs = System.currentTimeMillis()
+        if (!broadcastKeepaliveTracker.shouldSendKeepalive(nowMs)) {
+          continue
+        }
+
+        val sent = server.sendKeepalivePing()
+        if (sent) {
+          broadcastKeepaliveTracker.recordActivity(nowMs)
+        }
+      }
+    }
+  }
+
+  private fun stopKeepaliveLoop() {
+    keepaliveJob?.cancel()
+    keepaliveJob = null
+  }
+
   private fun beginServiceStop(manualStop: Boolean) {
     if (manualStop) {
       manualStopRequested = true
@@ -396,6 +443,8 @@ class BridgeService : Service() {
     latencyTimeoutJob?.cancel()
     pendingLatencyMeasurement = null
     stopPositionTicker()
+    stopKeepaliveLoop()
+    broadcastKeepaliveTracker.clear()
     lastStatusBroadcastPayload = null
     lastBroadcastPositionMs = null
     lastCoverSignalTrackId = null
@@ -574,6 +623,7 @@ class BridgeService : Service() {
     private const val NOTIFICATION_ID = 1001
     private const val POSITION_TICK_MS = 1000L
     private const val POSITION_RESYNC_INTERVAL = 5
+    private const val BROADCAST_KEEPALIVE_CHECK_MS = 5_000L
     private const val LATENCY_CONFIRMATION_TIMEOUT_MS = 1500L
     private const val SLOW_REQUEST_MS = 250L
     private const val VERY_SLOW_REQUEST_MS = 1000L

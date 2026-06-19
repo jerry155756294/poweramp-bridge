@@ -98,6 +98,10 @@ class ProtocolSessionManager(
       )
     }
 
+    if (message.context == ProtocolConstants.Pong) {
+      return ProtocolEngineResult()
+    }
+
     return when (connection.handshakeState) {
       HandshakeState.AWAITING_PLAYER -> handleAwaitingPlayer(connection, message)
       HandshakeState.AWAITING_PROTOCOL -> handleAwaitingProtocol(connection, message)

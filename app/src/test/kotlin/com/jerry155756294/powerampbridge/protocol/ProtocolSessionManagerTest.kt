@@ -141,6 +141,59 @@ class ProtocolSessionManagerTest {
   }
 
   @Test
+  fun `ping returns pong without disturbing handshake`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+
+    val result = manager.processMessage(
+      "broadcast",
+      IncomingMessage(ProtocolConstants.Ping, "hello")
+    )
+
+    assertEquals(ProtocolConstants.Pong, result.replies.single().context)
+    assertEquals("hello", result.replies.single().data)
+    assertNull(result.delegateMessage)
+    assertFalse(result.disconnect)
+    assertEquals(
+      HandshakeState.AWAITING_PLAYER,
+      manager.connectionDebugSnapshot("broadcast")?.handshakeState
+    )
+  }
+
+  @Test
+  fun `pong is ignored safely on ready request socket`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Init, null))
+
+    manager.registerConnection("request", "10.0.0.2")
+    manager.processMessage("request", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "request",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to true, "client_id" to "sender-1")
+      )
+    )
+
+    val result = manager.processMessage(
+      "request",
+      IncomingMessage(ProtocolConstants.Pong, null)
+    )
+
+    assertTrue(result.replies.isEmpty())
+    assertNull(result.delegateMessage)
+    assertFalse(result.disconnect)
+    assertEquals(0, manager.connectionDebugSnapshot("request")?.readyMessageCount)
+  }
+
+  @Test
   fun `same logical client can open multiple request sockets`() {
     manager.registerConnection("broadcast", "10.0.0.2")
     manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
