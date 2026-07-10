@@ -171,6 +171,8 @@ CI:
   - use GitHub Actions for `compileDebugKotlin`
   - use GitHub Actions for `testDebugUnitTest`
   - use GitHub Actions for debug APK generation
+  - download the resulting artifact directly to `_ci_apk/run_<run-id>/app-debug.apk`
+  - hand off the raw APK; do not retain or distribute a ZIP file
 - Latest verified CI build:
   - branch: `codex/github-actions-apk`
   - commit: `61e678e`

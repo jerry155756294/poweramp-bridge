@@ -34,6 +34,12 @@ data class PlaybackSnapshot(
   val track: TrackSnapshot = TrackSnapshot()
 )
 
+data class SenderPlaybackOverride(
+  val state: String,
+  val reason: String,
+  val expiresAtElapsedRealtimeMs: Long
+)
+
 data class LogEntry(
   val timestamp: String,
   val message: String
@@ -147,6 +153,7 @@ data class BridgeUiState(
   val coverState: CoverSnapshot = CoverSnapshot(),
   val coverSignalRevision: Long = 0L,
   val playback: PlaybackSnapshot = PlaybackSnapshot(),
+  val senderPlaybackOverride: SenderPlaybackOverride? = null,
   val recentCommands: List<LogEntry> = emptyList(),
   val recentProtocolEvents: List<LogEntry> = emptyList(),
   val recentPowerampEvents: List<LogEntry> = emptyList(),

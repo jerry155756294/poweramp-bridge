@@ -30,6 +30,7 @@ class MbrcProtocolServer(
     suspend fun onBroadcastReady(clientInfo: ProtocolClientInfo): List<String>
     suspend fun onSessionChanged(snapshot: LogicalClientSnapshot?)
     suspend fun onProbe(remoteAddress: String)
+    suspend fun onBroadcastTraffic(contexts: List<String>)
     suspend fun onProtocolEvent(message: String)
     suspend fun onConnectionRejected(snapshot: ConnectionDebugSnapshot, reason: String)
     suspend fun onConnectionClosed(snapshot: ConnectionDebugSnapshot, reason: String)
@@ -89,10 +90,26 @@ class MbrcProtocolServer(
     val socketId = mutex.withLock { protocolManager.broadcastSocketId() } ?: return
     val target = mutex.withLock { sessions[socketId] } ?: return
 
+    val sentContexts = mutableListOf<String>()
     messages.forEach { payload ->
-      mutex.withLock { protocolManager.markOutgoingContext(socketId, codec.parse(payload).context) }
+      val context = codec.parse(payload).context
+      mutex.withLock { protocolManager.markOutgoingContext(socketId, context) }
       target.send(payload)
+      sentContexts += context
     }
+    listener.onBroadcastTraffic(sentContexts)
+  }
+
+  suspend fun sendKeepalivePing(): Boolean {
+    val socketId = mutex.withLock { protocolManager.broadcastSocketId() } ?: return false
+    val target = mutex.withLock { sessions[socketId] } ?: return false
+    val payload = codec.encode(ProtocolConstants.Ping, "")
+
+    mutex.withLock { protocolManager.markOutgoingContext(socketId, ProtocolConstants.Ping) }
+    target.send(payload)
+    listener.onProtocolEvent("keepalive_ping:${shortSocketId(socketId)}")
+    listener.onBroadcastTraffic(listOf(ProtocolConstants.Ping))
+    return true
   }
 
   private suspend fun handleClient(
@@ -195,9 +212,14 @@ class MbrcProtocolServer(
     session: ClientSession,
     replies: List<OutgoingMessage>
   ) {
+    val sentContexts = mutableListOf<String>()
     replies.forEach { reply ->
       mutex.withLock { protocolManager.markOutgoingContext(socketId, reply.context) }
       session.send(codec.encode(reply.context, reply.data))
+      sentContexts += reply.context
+    }
+    if (sentContexts.isNotEmpty() && isBroadcastSocket(socketId)) {
+      listener.onBroadcastTraffic(sentContexts)
     }
   }
 
@@ -206,9 +228,15 @@ class MbrcProtocolServer(
     session: ClientSession,
     replies: List<String>
   ) {
+    val sentContexts = mutableListOf<String>()
     replies.forEach { payload ->
-      mutex.withLock { protocolManager.markOutgoingContext(socketId, codec.parse(payload).context) }
+      val context = codec.parse(payload).context
+      mutex.withLock { protocolManager.markOutgoingContext(socketId, context) }
       session.send(payload)
+      sentContexts += context
+    }
+    if (sentContexts.isNotEmpty() && isBroadcastSocket(socketId)) {
+      listener.onBroadcastTraffic(sentContexts)
     }
   }
 
@@ -230,6 +258,9 @@ class MbrcProtocolServer(
       message.contains("Connection reset", ignoreCase = true) ||
       message.contains("Broken pipe", ignoreCase = true)
   }
+
+  private suspend fun isBroadcastSocket(socketId: String): Boolean =
+    mutex.withLock { protocolManager.connectionDebugSnapshot(socketId)?.role == SocketRole.BROADCAST }
 
   private fun shortSocketId(socketId: String): String = socketId.take(8)
 

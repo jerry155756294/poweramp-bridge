@@ -435,7 +435,9 @@ class PowerampGateway(
         )
       )
     }
-    resetCoverStateForTrack(realId)
+    if (stateRepository.state.value.coverState.realId != realId) {
+      resetCoverStateForTrack(realId)
+    }
     stateRepository.recordPowerampEvent(
       "Track changed ($actionLabel): ${track.getString(PowerampAPI.Track.TITLE).orEmpty()}"
     )
@@ -466,6 +468,9 @@ class PowerampGateway(
       )
     }
     updateVolumeSnapshot()
+    stateRepository.recordPowerampEvent(
+      "poweramp_status_changed:$state source=$actionLabel state_code=$stateCode paused=$paused"
+    )
     stateRepository.recordPowerampEvent("Status changed ($actionLabel): $state")
   }
 
@@ -510,10 +515,22 @@ class PowerampGateway(
     configure(intent)
     val result = PowerampAPIHelper.sendPAIntent(context, intent)
 
-    if (!result) {
+    if (result) {
+      stateRepository.recordPowerampEvent("api_command_sent:${commandLabel(command)}")
+    } else {
       stateRepository.setError("Failed to send Poweramp command $command")
     }
     return result
+  }
+
+  private fun commandLabel(command: Int): String = when (command) {
+    PowerampAPI.Commands.TOGGLE_PLAY_PAUSE -> "playpause"
+    PowerampAPI.Commands.PLAY -> "play"
+    PowerampAPI.Commands.PAUSE -> "pause"
+    PowerampAPI.Commands.STOP -> "stop"
+    PowerampAPI.Commands.NEXT -> "next"
+    PowerampAPI.Commands.PREVIOUS -> "previous"
+    else -> command.toString()
   }
 
   private fun openToPlay(uri: Uri): Boolean =

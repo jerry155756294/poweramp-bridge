@@ -139,4 +139,30 @@ class BridgeStateRepositoryTest {
 
     assertEquals(1L, repository.state.value.coverSignalRevision)
   }
+
+  @Test
+  fun `sender playback override is separate from observed playback state`() {
+    repository.updatePlayback { it.copy(state = "playing") }
+
+    repository.overrideSenderPlaybackState(
+      state = "paused",
+      reason = "command_ack_pause",
+      expiresAtElapsedRealtimeMs = 2_500L
+    )
+
+    val state = repository.state.value
+    assertEquals("playing", state.playback.state)
+    assertEquals("paused", state.senderPlaybackOverride?.state)
+    assertEquals("command_ack_pause", state.senderPlaybackOverride?.reason)
+  }
+
+  @Test
+  fun `stale expiry cannot clear a newer sender override`() {
+    repository.overrideSenderPlaybackState("paused", "command_ack_pause", 2_500L)
+    repository.overrideSenderPlaybackState("playing", "command_ack_play", 3_000L)
+
+    repository.clearSenderPlaybackOverride("command_ack_pause")
+
+    assertEquals("playing", repository.state.value.senderPlaybackOverride?.state)
+  }
 }

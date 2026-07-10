@@ -86,7 +86,7 @@ class ProtocolSessionManagerTest {
   }
 
   @Test
-  fun `request socket auto initializes reconnecting broadcast for same client`() {
+  fun `request socket does not auto initialize broadcast that is still awaiting init`() {
     manager.registerConnection("broadcast", "10.0.0.2")
     manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
     manager.processMessage(
@@ -112,8 +112,12 @@ class ProtocolSessionManagerTest {
     )
 
     assertTrue(requestProtocolResult.sessionChanged)
-    assertTrue(requestProtocolResult.sessionSnapshot?.broadcastInitialized == true)
-    assertEquals(HandshakeState.READY, manager.connectionDebugSnapshot("broadcast")?.handshakeState)
+    assertFalse(requestProtocolResult.sessionSnapshot?.broadcastInitialized == true)
+    assertNull(manager.broadcastSocketId())
+    assertEquals(
+      HandshakeState.AWAITING_INIT,
+      manager.connectionDebugSnapshot("broadcast")?.handshakeState
+    )
   }
 
   @Test
@@ -134,6 +138,60 @@ class ProtocolSessionManagerTest {
       manager.connectionDebugSnapshot("probe")?.lastIncomingContext
     )
     assertEquals("probe_socket_completed", manager.inferCloseCategory("probe"))
+  }
+
+  @Test
+  fun `ping returns pong without disturbing handshake`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+
+    val result = manager.processMessage(
+      "broadcast",
+      IncomingMessage(ProtocolConstants.Ping, "hello")
+    )
+
+    assertEquals(ProtocolConstants.Pong, result.replies.single().context)
+    assertEquals("hello", result.replies.single().data)
+    assertNull(result.delegateMessage)
+    assertFalse(result.disconnect)
+    assertEquals(
+      HandshakeState.AWAITING_PLAYER,
+      manager.connectionDebugSnapshot("broadcast")?.handshakeState
+    )
+  }
+
+  @Test
+  fun `pong is ignored safely on ready request socket`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Init, null))
+
+    manager.registerConnection("request", "10.0.0.2")
+    manager.processMessage("request", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "request",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to true, "client_id" to "sender-1")
+      )
+    )
+
+    val result = manager.processMessage(
+      "request",
+      IncomingMessage(ProtocolConstants.Pong, null)
+    )
+
+    assertTrue(result.replies.isEmpty())
+    assertNull(result.delegateMessage)
+    assertFalse(result.disconnect)
+    assertEquals(ProtocolConstants.Pong, manager.connectionDebugSnapshot("request")?.lastIncomingContext)
+    assertEquals(HandshakeState.READY, manager.connectionDebugSnapshot("request")?.handshakeState)
   }
 
   @Test
@@ -194,6 +252,34 @@ class ProtocolSessionManagerTest {
   }
 
   @Test
+  fun `different client request socket is rejected when one logical sender already exists`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Init, null))
+
+    manager.registerConnection("request-other", "10.0.0.8")
+    manager.processMessage("request-other", IncomingMessage(ProtocolConstants.Player, "Android"))
+    val rejected = manager.processMessage(
+      "request-other",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to true, "client_id" to "sender-2")
+      )
+    )
+
+    assertTrue(rejected.disconnect)
+    assertEquals(ProtocolConstants.NotAllowed, rejected.replies.single().context)
+    assertEquals("single_client_only", rejected.rejectionReason)
+  }
+
+  @Test
   fun `same client can replace stale broadcast socket immediately`() {
     manager.registerConnection("broadcast-old", "10.0.0.2")
     manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Player, "Android"))
@@ -227,6 +313,45 @@ class ProtocolSessionManagerTest {
         markDisconnectCategory("broadcast-old", "broadcast_replaced_by_same_client")
       }.inferCloseCategory("broadcast-old")
     )
+  }
+
+  @Test
+  fun `replacing broadcast keeps existing request sockets for same logical client`() {
+    manager.registerConnection("broadcast-old", "10.0.0.2")
+    manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast-old",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Init, null))
+
+    manager.registerConnection("request-1", "10.0.0.2")
+    manager.processMessage("request-1", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "request-1",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to true, "client_id" to "sender-1")
+      )
+    )
+
+    manager.registerConnection("broadcast-new", "10.0.0.2")
+    manager.processMessage("broadcast-new", IncomingMessage(ProtocolConstants.Player, "Android"))
+    val replacement = manager.processMessage(
+      "broadcast-new",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+
+    assertEquals(setOf("broadcast-old"), replacement.socketsToClose)
+    assertEquals(1, replacement.sessionSnapshot?.requestSocketCount)
+    assertTrue(replacement.sessionSnapshot?.requestSocketConnected == true)
+    assertFalse(replacement.sessionSnapshot?.broadcastInitialized == true)
   }
 
   @Test
@@ -328,6 +453,22 @@ class ProtocolSessionManagerTest {
     manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
 
     assertEquals("broadcast_peer_closed_during_handshake", manager.inferCloseCategory("broadcast"))
+  }
+
+  @Test
+  fun `broadcast socket close is classified after init`() {
+    manager.registerConnection("broadcast", "10.0.0.2")
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Init, null))
+
+    assertEquals("broadcast_peer_closed_after_init", manager.inferCloseCategory("broadcast"))
   }
 
   @Test

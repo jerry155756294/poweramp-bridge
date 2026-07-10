@@ -55,7 +55,18 @@ internal class PlaybackObservationPipeline(
   fun senderFacingState(
     observed: BridgeUiState,
     nowMs: Long
-  ): SenderStateProjection = senderStatePolicy.project(observed, nowMs)
+  ): SenderStateProjection {
+    val stableProjection = senderStatePolicy.project(observed, nowMs)
+    val commandOverride = observed.senderPlaybackOverride
+      ?.takeIf { nowMs <= it.expiresAtElapsedRealtimeMs }
+      ?: return stableProjection
+
+    return stableProjection.copy(
+      state = stableProjection.state.copy(
+        playback = stableProjection.state.playback.copy(state = commandOverride.state)
+      )
+    )
+  }
 }
 
 internal class UnexpectedPauseRecoveryPolicy(
