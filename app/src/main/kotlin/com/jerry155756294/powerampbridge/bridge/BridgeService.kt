@@ -39,6 +39,7 @@ class BridgeService : Service() {
   private val codec = JsonMessageCodec()
   private lateinit var app: BridgeApplication
   private lateinit var powerampGateway: PowerampGateway
+  private lateinit var discoveryResponder: MbrcDiscoveryResponder
   private lateinit var adapter: MbrcProtocolAdapter
   private lateinit var server: MbrcProtocolServer
   private var settingsJob: Job? = null
@@ -69,6 +70,7 @@ class BridgeService : Service() {
     app = application as BridgeApplication
     val stateRepository = app.appContainer.stateRepository
     powerampGateway = PowerampGateway(this, app.appContainer.stateRepository)
+    discoveryResponder = MbrcDiscoveryResponder(this, stateRepository::recordProtocolEvent)
     adapter = MbrcProtocolAdapter(
       codec = codec,
       stateRepository = stateRepository,
@@ -218,6 +220,9 @@ class BridgeService : Service() {
     if (!stopCompleted) {
       runBlocking { performStopSequence() }
     }
+    if (::discoveryResponder.isInitialized) {
+      discoveryResponder.close()
+    }
     scope.cancel()
     super.onDestroy()
   }
@@ -243,6 +248,7 @@ class BridgeService : Service() {
           launch(Dispatchers.IO) {
             runCatching {
               server.start(settings.port)
+              discoveryResponder.start(settings.port)
               startedPort = settings.port
               app.appContainer.stateRepository.setListenerState(true, settings.port)
               app.appContainer.stateRepository.setError(null)
@@ -319,7 +325,10 @@ class BridgeService : Service() {
           if (statusChanged) {
             addAll(statusPayload)
           }
-          if (lastBroadcastPositionMs != senderState.playback.track.positionMs) {
+          if (
+            lastBroadcastPositionMs != senderState.playback.track.positionMs &&
+              positionSyncJob?.isActive != true
+          ) {
             add(adapter.positionMessage(senderState))
           }
           if (shouldSendCoverSignal) {
@@ -361,6 +370,8 @@ class BridgeService : Service() {
 
     app.appContainer.stateRepository.setPositionSyncActive(true)
     positionSyncJob = scope.launch(Dispatchers.IO) {
+      // Do not leave a newly connected sender waiting for the periodic position resync.
+      powerampGateway.requestPositionSync()
       var tickCount = 0
       while (true) {
         delay(POSITION_TICK_MS)
@@ -495,6 +506,10 @@ class BridgeService : Service() {
     lastCoverSignalTrackId = null
     lastCoverSignalRevision = null
     lastNotificationSnapshot = null
+
+    if (::discoveryResponder.isInitialized) {
+      discoveryResponder.stop()
+    }
 
     if (::server.isInitialized) {
       runCatching { server.stop() }
@@ -666,8 +681,8 @@ class BridgeService : Service() {
   companion object {
     internal const val CHANNEL_ID = "poweramp_bridge"
     private const val NOTIFICATION_ID = 1001
-    private const val POSITION_TICK_MS = 1000L
-    private const val POSITION_RESYNC_INTERVAL = 5
+    private const val POSITION_TICK_MS = 250L
+    private const val POSITION_RESYNC_INTERVAL = 20
     private const val BROADCAST_KEEPALIVE_CHECK_MS = 5_000L
     private const val COMMAND_ACK_TTL_MS = 1_500L
     private const val LATENCY_CONFIRMATION_TIMEOUT_MS = 1500L

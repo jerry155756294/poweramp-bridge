@@ -17,6 +17,7 @@ interface PowerampController {
   fun setVolume(volumePercent: Int)
   fun refreshVolumeSnapshot()
   fun seekTo(positionMs: Long): Boolean
+  fun setLfmRating(action: String): Boolean
   fun toggleShuffle(): Boolean
   fun setShuffle(mode: String): Boolean
   fun toggleRepeat(): Boolean

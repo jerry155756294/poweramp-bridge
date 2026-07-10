@@ -114,6 +114,9 @@ class MbrcProtocolAdapter(
       ProtocolConstants.NowPlayingLyrics ->
         listOf(codec.encode(ProtocolConstants.NowPlayingLyrics, mapOf("status" to 404, "lyrics" to "")))
 
+      ProtocolConstants.NowPlayingLfmRating ->
+        lfmRatingResponse(message)
+
       ProtocolConstants.RadioStations ->
         listOf(codec.encode(ProtocolConstants.RadioStations, pagedRadioPayload(pageRequest(message.data))))
 
@@ -185,6 +188,7 @@ class MbrcProtocolAdapter(
     add(codec.encode(ProtocolConstants.PlayerShuffle, state.playback.shuffle))
     add(codec.encode(ProtocolConstants.PlayerVolume, state.playback.volume))
     add(codec.encode(ProtocolConstants.NowPlayingTrack, trackPayload(state)))
+    add(codec.encode(ProtocolConstants.NowPlayingLfmRating, lfmRatingPayload(state)))
     if (includePosition) {
       add(positionMessage(state))
     }
@@ -226,6 +230,23 @@ class MbrcProtocolAdapter(
     "current" to state.playback.track.positionMs,
     "total" to state.playback.track.durationMs
   )
+
+  private fun lfmRatingResponse(message: IncomingMessage): List<String> {
+    val action = rawString(message.data)?.trim()?.lowercase()
+    if (action.isNullOrEmpty()) {
+      return listOf(codec.encode(ProtocolConstants.NowPlayingLfmRating, lfmRatingPayload(stateRepository.state.value)))
+    }
+    if (action !in LFM_RATING_ACTIONS || !powerampGateway.setLfmRating(action)) {
+      return commandUnavailable(ProtocolConstants.NowPlayingLfmRating)
+    }
+    return listOf(codec.encode(ProtocolConstants.NowPlayingLfmRating, lfmRatingPayload(stateRepository.state.value)))
+  }
+
+  private fun lfmRatingPayload(state: BridgeUiState): String = when (state.playback.track.rating) {
+    PowerampRating.LIKE -> "Love"
+    PowerampRating.UNLIKE -> "Ban"
+    else -> "Normal"
+  }
 
   private fun pagedQueuePayload(request: PageRequest): Map<String, Any> {
     val items = queueItems()
@@ -502,5 +523,11 @@ class MbrcProtocolAdapter(
 
   private companion object {
     const val DEFAULT_PAGE_LIMIT = 800
+    val LFM_RATING_ACTIONS = setOf("love", "ban", ProtocolConstants.Toggle)
   }
+}
+
+private object PowerampRating {
+  const val UNLIKE = 1
+  const val LIKE = 5
 }

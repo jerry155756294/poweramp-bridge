@@ -337,6 +337,37 @@ class PowerampGateway(
     }
   }
 
+  override fun setLfmRating(action: String): Boolean {
+    val currentRating = stateRepository.state.value.playback.track.rating
+    val targetRating = when (action.lowercase()) {
+      "love" -> if (currentRating == PowerampAPI.Track.RATING_LIKE) {
+        PowerampAPI.Track.RATING_NOT_SET
+      } else {
+        PowerampAPI.Track.RATING_LIKE
+      }
+      "ban" -> if (currentRating == PowerampAPI.Track.RATING_UNLIKE) {
+        PowerampAPI.Track.RATING_NOT_SET
+      } else {
+        PowerampAPI.Track.RATING_UNLIKE
+      }
+      // MBRC only emits toggle when clearing its current Love or Ban state.
+      "toggle" -> PowerampAPI.Track.RATING_NOT_SET
+      else -> return false
+    }
+    val success = sendCommand(PowerampAPI.Commands.SET_RATING) {
+      it.putExtra(PowerampAPI.EXTRA_RATING, targetRating)
+    }
+    if (success) {
+      stateRepository.updatePlayback { playback ->
+        playback.copy(track = playback.track.copy(rating = targetRating))
+      }
+      stateRepository.recordPowerampEvent(
+        "Poweramp rating mapped: action=$action rating=$targetRating"
+      )
+    }
+    return success
+  }
+
   override fun setShuffle(mode: String): Boolean {
     val normalized = when (mode.lowercase()) {
       "shuffle", "on" -> "shuffle"
@@ -427,6 +458,8 @@ class PowerampGateway(
           sampleRate = bundleString(track, PowerampAPI.Track.SAMPLE_RATE),
           channels = bundleString(track, PowerampAPI.Track.CHANNELS),
           bitrate = bundleString(track, PowerampAPI.Track.BITRATE),
+          rating = PowerampBroadcastDiagnostics.readInt(track, PowerampAPI.Track.RATING)
+            ?: playback.track.rating,
           positionMs = if (positionSec >= 0) {
             normalizePositionMs(positionSec.toLong() * 1000L, durationMs)
           } else {
@@ -530,6 +563,7 @@ class PowerampGateway(
     PowerampAPI.Commands.STOP -> "stop"
     PowerampAPI.Commands.NEXT -> "next"
     PowerampAPI.Commands.PREVIOUS -> "previous"
+    PowerampAPI.Commands.SET_RATING -> "set_rating"
     else -> command.toString()
   }
 

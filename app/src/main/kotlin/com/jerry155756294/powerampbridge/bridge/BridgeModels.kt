@@ -17,6 +17,7 @@ data class TrackSnapshot(
   val year: String = "",
   val durationMs: Long = 0L,
   val positionMs: Long = 0L,
+  val rating: Int = 0,
   val trackNo: String = "",
   val discNo: String = "",
   val sampleRate: String = "",

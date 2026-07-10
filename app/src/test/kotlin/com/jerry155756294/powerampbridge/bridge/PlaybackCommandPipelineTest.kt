@@ -75,6 +75,7 @@ class PlaybackCommandPipelineTest {
     override fun setVolume(volumePercent: Int) = Unit
     override fun refreshVolumeSnapshot() = Unit
     override fun seekTo(positionMs: Long): Boolean = true
+    override fun setLfmRating(action: String): Boolean = true
     override fun toggleShuffle(): Boolean = true
     override fun setShuffle(mode: String): Boolean = true
     override fun toggleRepeat(): Boolean = true

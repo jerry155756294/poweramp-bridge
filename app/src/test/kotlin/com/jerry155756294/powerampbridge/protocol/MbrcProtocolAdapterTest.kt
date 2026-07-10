@@ -19,7 +19,7 @@ import org.robolectric.RobolectricTestRunner
 class MbrcProtocolAdapterTest {
   private val codec = JsonMessageCodec()
   private val repository = BridgeStateRepository()
-  private val controller = FakePowerampController()
+  private val controller = FakePowerampController(repository)
   private val adapter = MbrcProtocolAdapter(codec, repository, controller)
 
   @Test
@@ -96,6 +96,54 @@ class MbrcProtocolAdapterTest {
       assertFalse(data.getBoolean("accepted"))
       assertTrue(data.getBoolean("unsupported"))
     }
+  }
+
+  @Test
+  fun `nowplayinglfmrating maps love to Poweramp like rating`() {
+    val reply = adapter.handleCommand(
+      IncomingMessage(ProtocolConstants.NowPlayingLfmRating, "love")
+    ).single()
+
+    assertEquals("love", controller.lastLfmRatingAction)
+    assertEquals("Love", JSONObject(reply).getString("data"))
+    assertEquals(5, repository.state.value.playback.track.rating)
+  }
+
+  @Test
+  fun `nowplayinglfmrating clears love when love is requested again`() {
+    repository.updatePlayback { it.copy(track = it.track.copy(rating = 5)) }
+
+    val reply = adapter.handleCommand(
+      IncomingMessage(ProtocolConstants.NowPlayingLfmRating, "love")
+    ).single()
+
+    assertEquals("Normal", JSONObject(reply).getString("data"))
+    assertEquals(0, repository.state.value.playback.track.rating)
+  }
+
+  @Test
+  fun `nowplayinglfmrating clears ban when ban is requested again`() {
+    repository.updatePlayback { it.copy(track = it.track.copy(rating = 1)) }
+
+    val reply = adapter.handleCommand(
+      IncomingMessage(ProtocolConstants.NowPlayingLfmRating, "ban")
+    ).single()
+
+    assertEquals("Normal", JSONObject(reply).getString("data"))
+    assertEquals(0, repository.state.value.playback.track.rating)
+  }
+
+  @Test
+  fun `nowplayinglfmrating maps toggle to clearing the Poweramp rating`() {
+    repository.updatePlayback { it.copy(track = it.track.copy(rating = 1)) }
+
+    val reply = adapter.handleCommand(
+      IncomingMessage(ProtocolConstants.NowPlayingLfmRating, ProtocolConstants.Toggle)
+    ).single()
+
+    assertEquals("toggle", controller.lastLfmRatingAction)
+    assertEquals("Normal", JSONObject(reply).getString("data"))
+    assertEquals(0, repository.state.value.playback.track.rating)
   }
 
   @Test
@@ -213,7 +261,9 @@ class MbrcProtocolAdapterTest {
     assertEquals(5L, item.getLong("id"))
   }
 
-  private class FakePowerampController : PowerampController {
+  private class FakePowerampController(
+    private val repository: BridgeStateRepository
+  ) : PowerampController {
     var coverStatus: Int = 404
     var coverPayload: Map<String, Any?> = mapOf("status" to 404, "cover" to null)
     var coverPayloadCalls = 0
@@ -225,6 +275,7 @@ class MbrcProtocolAdapterTest {
     var lastQueueCommandPlayPath: String? = null
     var playedQueuePosition: Int? = null
     var playedPath: String? = null
+    var lastLfmRatingAction: String? = null
 
     override fun currentCoverStatus(): Int = coverStatus
     override fun currentCoverPayload(): Map<String, Any?> {
@@ -261,6 +312,19 @@ class MbrcProtocolAdapterTest {
     override fun setVolume(volumePercent: Int) = Unit
     override fun refreshVolumeSnapshot() = Unit
     override fun seekTo(positionMs: Long): Boolean = true
+    override fun setLfmRating(action: String): Boolean {
+      lastLfmRatingAction = action
+      val currentRating = repository.state.value.playback.track.rating
+      val rating = when (action) {
+        "love" -> if (currentRating == 5) 0 else 5
+        "ban" -> if (currentRating == 1) 0 else 1
+        else -> 0
+      }
+      repository.updatePlayback { playback ->
+        playback.copy(track = playback.track.copy(rating = rating))
+      }
+      return true
+    }
     override fun toggleShuffle(): Boolean = true
     override fun setShuffle(mode: String): Boolean = true
     override fun toggleRepeat(): Boolean = true
