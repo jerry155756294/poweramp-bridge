@@ -225,8 +225,16 @@ class PowerampGateway(
       return streamStations
     }
 
+    val playlistStations = readPlaylistRadioStations()
+    if (playlistStations.isNotEmpty()) {
+      stateRepository.recordPowerampEvent(
+        "Radio query source=poweramp_playlists total=${playlistStations.size}"
+      )
+      return playlistStations
+    }
+
     // Poweramp can load a radio M3U directly into its current queue without creating a row in
-    // the /streams collection. This is how the shown "playlist: radiopara..." stream is stored.
+    // the /streams collection. This is the final fallback for playlist-backed radio sources.
     val queuedStations = readQueueItems()
       .asSequence()
       .filter { it.path.isHttpUrl() }
@@ -242,7 +250,7 @@ class PowerampGateway(
       .toList()
       .normalizeRadioStations()
     stateRepository.recordPowerampEvent(
-      "Radio query source=${if (queuedStations.isEmpty()) "poweramp_queue_empty" else "poweramp_queue"} total=${queuedStations.size}"
+      "Radio query source=${if (queuedStations.isEmpty()) "poweramp_queue_no_http" else "poweramp_queue"} total=${queuedStations.size}"
     )
     return queuedStations
   }
@@ -292,6 +300,93 @@ class PowerampGateway(
       )
       stateRepository.recordPowerampEvent(
         "Radio query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.getOrDefault(emptyList())
+  }
+
+  private fun readPlaylistRadioStations(): List<PowerampRadioStation> {
+    val playlistsUri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("playlists")
+      .build()
+    val playlists = runCatching {
+      context.contentResolver.query(
+        playlistsUri,
+        arrayOf(
+          "${TableDefs.Playlists._ID} AS playlist_id",
+          "${TableDefs.Playlists.PLAYLIST} AS playlist_name"
+        ),
+        null,
+        null,
+        null
+      )?.use { cursor ->
+        buildList {
+          while (cursor.moveToNext()) {
+            val id = cursor.longOrNull("playlist_id") ?: continue
+            add(id to cursor.stringOrBlank("playlist_name"))
+          }
+        }
+      } ?: emptyList()
+    }.onFailure { error ->
+      Timber.w(error, "Failed querying Poweramp playlists")
+      stateRepository.recordPowerampEvent(
+        "Radio playlist query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.getOrDefault(emptyList())
+
+    return playlists.flatMap { (playlistId, playlistName) ->
+      readPlaylistRadioEntries(playlistId, playlistName)
+    }.normalizeRadioStations()
+  }
+
+  private fun readPlaylistRadioEntries(
+    playlistId: Long,
+    playlistName: String
+  ): List<PowerampRadioStation> {
+    val entriesUri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("playlists")
+      .appendEncodedPath(playlistId.toString())
+      .appendEncodedPath("files")
+      .build()
+    return runCatching {
+      context.contentResolver.query(
+        entriesUri,
+        arrayOf(
+          "${TableDefs.PlaylistEntries._ID} AS entry_id",
+          "${TableDefs.PlaylistEntries.FILE_NAME} AS entry_file_name",
+          "${TableDefs.Files.NAME_WITHOUT_NUMBER} AS station_name",
+          "${TableDefs.Files.TITLE_TAG} AS title_tag",
+          "${TableDefs.Files.ARTIST_TAG} AS artist_tag",
+          "${TableDefs.Files.ALBUM_TAG} AS album_tag",
+          "${TableDefs.Files.URL} AS entry_url",
+          "${TableDefs.Files.FULL_PATH} AS entry_path"
+        ),
+        null,
+        null,
+        null
+      )?.use { cursor ->
+        buildList {
+          while (cursor.moveToNext()) {
+            val entryId = cursor.longOrNull("entry_id") ?: continue
+            val url = sequenceOf("entry_url", "entry_path", "entry_file_name")
+              .map(cursor::stringOrBlank)
+              .firstOrNull { it.isHttpUrl() }
+              ?: continue
+            add(
+              PowerampRadioStation(
+                streamId = entryId,
+                name = cursor.firstNonBlank("station_name", "title_tag").ifBlank { playlistName }.ifBlank { url },
+                url = url,
+                artist = cursor.stringOrBlank("artist_tag"),
+                album = cursor.stringOrBlank("album_tag")
+              )
+            )
+          }
+        }
+      } ?: emptyList()
+    }.onFailure { error ->
+      Timber.w(error, "Failed querying Poweramp playlist entries")
+      stateRepository.recordPowerampEvent(
+        "Radio playlist entries failed: id=$playlistId ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
       )
     }.getOrDefault(emptyList())
   }
