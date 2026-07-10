@@ -668,7 +668,7 @@ private fun PowerampDataAccessCard(
 ) {
   val (statusLabel, summary) = when (status) {
     PowerampDataAccessStatus.AVAILABLE -> "可讀取" to "Bridge 已可讀取 Poweramp 的清單與廣播資料。"
-    PowerampDataAccessStatus.REQUESTED -> "等待驗證" to "已送出存取要求；請讓 Poweramp 保持執行，然後重新整理廣播清單。"
+    PowerampDataAccessStatus.REQUESTED -> "正在驗證" to "已送出存取要求，Bridge 正在檢查 Poweramp 的廣播清單。"
     PowerampDataAccessStatus.FAILED -> "讀取失敗" to "Poweramp 尚未提供清單存取權，請開啟 Poweramp 後重新要求。"
     PowerampDataAccessStatus.NOT_REQUESTED -> {
       if (hasRequestedBefore) {
