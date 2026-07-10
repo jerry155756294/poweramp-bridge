@@ -435,7 +435,9 @@ class PowerampGateway(
         )
       )
     }
-    resetCoverStateForTrack(realId)
+    if (stateRepository.state.value.coverState.realId != realId) {
+      resetCoverStateForTrack(realId)
+    }
     stateRepository.recordPowerampEvent(
       "Track changed ($actionLabel): ${track.getString(PowerampAPI.Track.TITLE).orEmpty()}"
     )
