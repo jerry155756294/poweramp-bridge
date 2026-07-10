@@ -5,11 +5,10 @@ import android.net.wifi.WifiManager
 import android.provider.Settings
 import com.jerry155756294.powerampbridge.protocol.ProtocolConstants
 import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.net.MulticastSocket
-import java.net.NetworkInterface
 import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,29 +55,29 @@ class MbrcDiscoveryResponder(
 
     running = true
     val name = deviceName(appContext)
-    multicastBindings().forEach { binding ->
-      runCatching {
-        MulticastSocket(null).apply {
-          reuseAddress = true
-          bind(InetSocketAddress(binding.address, DISCOVERY_PORT))
-          joinGroup(InetSocketAddress(MULTICAST_GROUP, DISCOVERY_PORT), binding.networkInterface)
-        }
-      }.onSuccess { socket ->
-        sockets += socket
-        receiveJobs += scope.launch {
-          receiveLoop(socket, binding.address, listeningPort, name)
-        }
-      }.onFailure { error ->
-        Timber.w(error, "Discovery bind failed for %s", binding.address.hostAddress)
+    runCatching {
+      // Match the MBRC Android sender: bind the multicast port on all local
+      // addresses, then join the group using the active/default network.
+      // Android's NetworkInterface.supportsMulticast() is not reliable on all
+      // devices, and binding only a selected interface can discard Wi-Fi input.
+      MulticastSocket(DISCOVERY_PORT).apply {
+        joinGroup(MULTICAST_GROUP)
       }
+    }.onSuccess { socket ->
+      sockets += socket
+      receiveJobs += scope.launch {
+        receiveLoop(socket, listeningPort, name)
+      }
+    }.onFailure { error ->
+      Timber.w(error, "Discovery multicast socket could not start")
+      onEvent("discovery_not_started:socket:${error.javaClass.simpleName}")
     }
 
     if (sockets.isEmpty()) {
       running = false
       releaseMulticastLock()
-      onEvent("discovery_not_started:no_ipv4_multicast_interface")
     } else {
-      onEvent("discovery_started:port=$listeningPort interfaces=${sockets.size} name=$name")
+      onEvent("discovery_started:port=$listeningPort sockets=${sockets.size} name=$name")
     }
   }
 
@@ -108,7 +107,6 @@ class MbrcDiscoveryResponder(
 
   private fun receiveLoop(
     socket: MulticastSocket,
-    localAddress: Inet4Address,
     listeningPort: Int,
     name: String
   ) {
@@ -119,6 +117,11 @@ class MbrcDiscoveryResponder(
         socket.receive(packet)
         if (!MbrcDiscoveryProtocol.isRequest(packet.data, packet.length)) continue
 
+        val localAddress = localAddressFor(packet.address)
+        if (localAddress == null) {
+          onEvent("discovery_reply_skipped:no_ipv4_route")
+          continue
+        }
         val response = MbrcDiscoveryProtocol.notify(
           address = localAddress.hostAddress,
           name = name,
@@ -129,7 +132,7 @@ class MbrcDiscoveryResponder(
         onEvent("discovery_reply:${localAddress.hostAddress}:$listeningPort")
       } catch (error: Exception) {
         if (running && !socket.isClosed) {
-          Timber.w(error, "Discovery receive failed for %s", localAddress.hostAddress)
+          Timber.w(error, "Discovery receive failed")
           onEvent("discovery_receive_error:${error.javaClass.simpleName}")
         }
         break
@@ -137,32 +140,13 @@ class MbrcDiscoveryResponder(
     }
   }
 
-  private fun multicastBindings(): List<MulticastBinding> {
-    val interfaces = runCatching { NetworkInterface.getNetworkInterfaces() }.getOrNull()
-      ?: return emptyList()
-    val bindings = mutableListOf<MulticastBinding>()
-    while (interfaces.hasMoreElements()) {
-      val networkInterface = interfaces.nextElement()
-      if (!runCatching {
-          networkInterface.isUp && !networkInterface.isLoopback && networkInterface.supportsMulticast()
-        }.getOrDefault(false)
-      ) {
-        continue
-      }
-      val addresses = networkInterface.inetAddresses
-      while (addresses.hasMoreElements()) {
-        val address = addresses.nextElement() as? Inet4Address ?: continue
-        if (!address.isSiteLocalAddress) continue
-        bindings += MulticastBinding(networkInterface, address)
-      }
+  /** Returns the IPv4 address that the Android network stack would use to reach [remoteAddress]. */
+  private fun localAddressFor(remoteAddress: InetAddress): Inet4Address? = runCatching {
+    DatagramSocket().use { probe ->
+      probe.connect(remoteAddress, DISCOVERY_PORT)
+      probe.localAddress as? Inet4Address
     }
-    return bindings
-  }
-
-  private data class MulticastBinding(
-    val networkInterface: NetworkInterface,
-    val address: Inet4Address
-  )
+  }.getOrNull()?.takeUnless { it.isAnyLocalAddress || it.isLoopbackAddress }
 
   companion object {
     private const val DISCOVERY_PORT = 45345
