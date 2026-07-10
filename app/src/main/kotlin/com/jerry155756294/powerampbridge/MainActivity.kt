@@ -68,11 +68,16 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
   private val notificationPermission =
     registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+  private val mediaAudioPermission =
+    registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
       notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+      mediaAudioPermission.launch(Manifest.permission.READ_MEDIA_AUDIO)
+    } else {
+      mediaAudioPermission.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
     }
 
     val app = application as BridgeApplication

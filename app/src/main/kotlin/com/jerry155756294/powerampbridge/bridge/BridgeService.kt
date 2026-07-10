@@ -52,6 +52,7 @@ class BridgeService : Service() {
   private var lastBroadcastPositionMs: Long? = null
   private var lastCoverSignalTrackId: Long? = null
   private var lastCoverSignalRevision: Long? = null
+  private var lastLyricsSignalTrackKey: String? = null
   private var pendingLatencyMeasurement: PendingLatencyMeasurement? = null
   private var latencyTimeoutJob: Job? = null
   private var commandAckJob: Job? = null
@@ -139,21 +140,22 @@ class BridgeService : Service() {
         val nowMs = SystemClock.elapsedRealtime()
         val senderProjection = observationPipeline.senderFacingState(stateRepository.state.value, nowMs)
         senderProjection.protocolEvents.forEach(stateRepository::recordProtocolEvent)
-        return adapter.snapshotMessages(
+        val initialMessages = adapter.snapshotMessages(
           senderProjection.state,
           includePosition = true,
           includeCover = true
-        ).also {
-          val state = senderProjection.state
-          lastStatusBroadcastPayload = adapter.snapshotMessages(
-            state,
-            includePosition = false,
-            includeCover = false
-          )
-          lastBroadcastPositionMs = state.playback.track.positionMs
-          lastCoverSignalTrackId = state.playback.track.realId
-          lastCoverSignalRevision = state.coverSignalRevision
-        }
+        )
+        val state = senderProjection.state
+        lastStatusBroadcastPayload = adapter.snapshotMessages(
+          state,
+          includePosition = false,
+          includeCover = false
+        )
+        lastBroadcastPositionMs = state.playback.track.positionMs
+        lastCoverSignalTrackId = state.playback.track.realId
+        lastCoverSignalRevision = state.coverSignalRevision
+        lastLyricsSignalTrackKey = lyricsTrackKey(state)
+        return initialMessages + adapter.lyricsMessage()
       }
 
       override suspend fun onSessionChanged(snapshot: LogicalClientSnapshot?) {
@@ -166,6 +168,7 @@ class BridgeService : Service() {
           lastBroadcastPositionMs = null
           lastCoverSignalTrackId = null
           lastCoverSignalRevision = null
+          lastLyricsSignalTrackKey = null
         }
       }
 
@@ -319,6 +322,8 @@ class BridgeService : Service() {
               (state.playback.track.realId > 0L || lastCoverSignalTrackId != null)
             ) ||
             state.coverSignalRevision != lastCoverSignalRevision
+        val lyricsTrackKey = lyricsTrackKey(senderState)
+        val shouldSendLyricsSignal = lyricsTrackKey != lastLyricsSignalTrackKey
 
         val statusChanged = statusPayload != lastStatusBroadcastPayload
         val messages = buildList {
@@ -336,7 +341,7 @@ class BridgeService : Service() {
           }
         }
 
-        if (messages.isNotEmpty()) {
+        if (messages.isNotEmpty() || shouldSendLyricsSignal) {
           val senderOverride = state.senderPlaybackOverride
           lastStatusBroadcastPayload = statusPayload
           lastBroadcastPositionMs = senderState.playback.track.positionMs
@@ -344,8 +349,16 @@ class BridgeService : Service() {
             lastCoverSignalTrackId = senderState.playback.track.realId
             lastCoverSignalRevision = senderState.coverSignalRevision
           }
+          if (shouldSendLyricsSignal) {
+            lastLyricsSignalTrackKey = lyricsTrackKey
+          }
           launch(Dispatchers.IO) {
-            server.sendBroadcast(messages)
+            if (messages.isNotEmpty()) {
+              server.sendBroadcast(messages)
+            }
+            if (shouldSendLyricsSignal) {
+              server.sendBroadcast(listOf(adapter.lyricsMessage()))
+            }
             if (statusChanged && senderOverride != null) {
               app.appContainer.stateRepository.recordProtocolEvent(
                 "sender_status_sent:${senderState.playback.state} reason=${senderOverride.reason}"
@@ -505,6 +518,7 @@ class BridgeService : Service() {
     lastBroadcastPositionMs = null
     lastCoverSignalTrackId = null
     lastCoverSignalRevision = null
+    lastLyricsSignalTrackKey = null
     lastNotificationSnapshot = null
 
     if (::discoveryResponder.isInitialized) {
@@ -664,6 +678,9 @@ class BridgeService : Service() {
     ProtocolConstants.NowPlayingPosition -> "position"
     else -> "none"
   }
+
+  private fun lyricsTrackKey(state: BridgeUiState): String =
+    "${state.playback.track.realId}:${state.playback.track.path}"
 
   private fun createNotificationChannel() {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

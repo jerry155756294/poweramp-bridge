@@ -3,6 +3,8 @@ package com.jerry155756294.powerampbridge.bridge
 interface PowerampController {
   fun currentCoverStatus(): Int
   fun currentCoverPayload(): Map<String, Any?>
+  /** Returns the active track's lyrics in MBRC v3+ payload form. */
+  fun currentLyricsPayload(): Map<String, Any>
   fun readQueueItems(): List<PowerampQueueItem>
   fun readRadioStations(): List<PowerampRadioStation>
   fun playPause(): Boolean

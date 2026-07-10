@@ -99,6 +99,17 @@ class MbrcProtocolAdapterTest {
   }
 
   @Test
+  fun `nowplayinglyrics returns the gateway payload`() {
+    controller.lyricsPayload = mapOf("status" to 200, "lyrics" to "[00:01.00]First line")
+
+    val reply = adapter.handleCommand(IncomingMessage(ProtocolConstants.NowPlayingLyrics, null)).single()
+    val data = JSONObject(reply).getJSONObject("data")
+
+    assertEquals(200, data.getInt("status"))
+    assertEquals("[00:01.00]First line", data.getString("lyrics"))
+  }
+
+  @Test
   fun `nowplayinglfmrating maps love to Poweramp like rating`() {
     val reply = adapter.handleCommand(
       IncomingMessage(ProtocolConstants.NowPlayingLfmRating, "love")
@@ -258,7 +269,7 @@ class MbrcProtocolAdapterTest {
     assertEquals(1, data.getInt("total"))
     assertEquals("Station One", item.getString("name"))
     assertEquals("https://radio.example/1", item.getString("url"))
-    assertEquals(5L, item.getLong("id"))
+    assertFalse(item.has("id"))
   }
 
   private class FakePowerampController(
@@ -266,6 +277,7 @@ class MbrcProtocolAdapterTest {
   ) : PowerampController {
     var coverStatus: Int = 404
     var coverPayload: Map<String, Any?> = mapOf("status" to 404, "cover" to null)
+    var lyricsPayload: Map<String, Any> = mapOf("status" to 404, "lyrics" to "")
     var coverPayloadCalls = 0
     var queueItems: List<PowerampQueueItem> = emptyList()
     var radioStations: List<PowerampRadioStation> = emptyList()
@@ -282,6 +294,7 @@ class MbrcProtocolAdapterTest {
       coverPayloadCalls += 1
       return coverPayload
     }
+    override fun currentLyricsPayload(): Map<String, Any> = lyricsPayload
     override fun readQueueItems(): List<PowerampQueueItem> = queueItems
     override fun readRadioStations(): List<PowerampRadioStation> = radioStations
 

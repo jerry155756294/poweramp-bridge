@@ -112,7 +112,7 @@ class MbrcProtocolAdapter(
         listOf(codec.encode(ProtocolConstants.NowPlayingCover, powerampGateway.currentCoverPayload()))
 
       ProtocolConstants.NowPlayingLyrics ->
-        listOf(codec.encode(ProtocolConstants.NowPlayingLyrics, mapOf("status" to 404, "lyrics" to "")))
+        listOf(codec.encode(ProtocolConstants.NowPlayingLyrics, powerampGateway.currentLyricsPayload()))
 
       ProtocolConstants.NowPlayingLfmRating ->
         lfmRatingResponse(message)
@@ -206,6 +206,9 @@ class MbrcProtocolAdapter(
       ProtocolConstants.NowPlayingCover,
       mapOf("status" to powerampGateway.currentCoverStatus(), "cover" to null)
     )
+
+  fun lyricsMessage(): String =
+    codec.encode(ProtocolConstants.NowPlayingLyrics, powerampGateway.currentLyricsPayload())
 
   private fun pluginVersion(): String = "poweramp-bridge ${BuildConfig.VERSION_NAME}"
 
@@ -335,10 +338,9 @@ class MbrcProtocolAdapter(
     val items = stations.map { station ->
       linkedMapOf(
         "name" to station.name,
-        "url" to station.url,
-        "id" to station.streamId,
-        "artist" to station.artist,
-        "album" to station.album
+        // MBRC's RadioStationDto deliberately only has these two fields. Keeping the
+        // payload exact also lets its refresh replace the old local list cleanly.
+        "url" to station.url
       )
     }
     val pageData = items.drop(request.offset).take(request.limit)

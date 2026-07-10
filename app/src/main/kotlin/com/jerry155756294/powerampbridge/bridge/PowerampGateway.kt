@@ -8,6 +8,7 @@ import android.database.Cursor
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioManager
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
@@ -49,6 +50,7 @@ class PowerampGateway(
       )
       runCatching {
         when (intent.action) {
+          ACTION_VOLUME_CHANGED -> handleVolumeChanged(intent)
           PowerampAPI.ACTION_TRACK_CHANGED -> handleTrack(intent, actionLabel)
           PowerampAPI.ACTION_TRACK_CHANGED_EXPLICIT -> handleTrack(intent, actionLabel)
           PowerampAPI.ACTION_STATUS_CHANGED -> handleStatus(intent, actionLabel)
@@ -72,6 +74,7 @@ class PowerampGateway(
     if (registered) return
     refreshAvailability()
     val filter = IntentFilter().apply {
+      addAction(ACTION_VOLUME_CHANGED)
       addAction(PowerampAPI.ACTION_TRACK_CHANGED)
       addAction(PowerampAPI.ACTION_TRACK_CHANGED_EXPLICIT)
       addAction(PowerampAPI.ACTION_STATUS_CHANGED)
@@ -143,6 +146,16 @@ class PowerampGateway(
       "Cover reply: ${coverState.summary()} track=${realId}"
     )
     return coverState.payload()
+  }
+
+  override fun currentLyricsPayload(): Map<String, Any> {
+    val track = stateRepository.state.value.playback.track
+    val lyrics = readCurrentLyrics(track.realId, track.path)
+    val status = if (lyrics.isBlank()) 404 else 200
+    stateRepository.recordPowerampEvent(
+      "Lyrics reply: status=$status source=${if (lyrics.isBlank()) "none" else "available"} track=${track.realId}"
+    )
+    return mapOf("status" to status, "lyrics" to lyrics)
   }
 
   override fun readQueueItems(): List<PowerampQueueItem> {
@@ -230,7 +243,13 @@ class PowerampGateway(
             )
           }
         }
-      } ?: emptyList()
+      }?.asSequence()
+        // Empty URLs cannot be played by MBRC, so don't let them replace its cached list.
+        ?.filter { it.url.isNotBlank() }
+        ?.distinctBy { it.url.trim().lowercase() }
+        ?.sortedBy { it.name.lowercase() }
+        ?.toList()
+        ?: emptyList()
     }.onFailure { error ->
       Timber.w(error, "Failed querying Poweramp streams")
       stateRepository.recordPowerampEvent(
@@ -434,6 +453,92 @@ class PowerampGateway(
     val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
     val percent = ((current.toFloat() / max) * 100f).toInt().coerceIn(0, 100)
     stateRepository.updatePlayback { it.copy(volume = percent) }
+  }
+
+  private fun handleVolumeChanged(intent: Intent) {
+    val streamType = intent.getIntExtra(EXTRA_VOLUME_STREAM_TYPE, -1)
+    if (streamType != AudioManager.STREAM_MUSIC) {
+      return
+    }
+    updateVolumeSnapshot()
+    stateRepository.recordPowerampEvent(
+      "System music volume changed: ${stateRepository.state.value.playback.volume}%"
+    )
+  }
+
+  /**
+   * Poweramp does not expose one public "read the rendered lyrics" command. Its provider can
+   * expose lyrics columns on current files in newer builds, while sidecar LRC and embedded lyrics
+   * remain local to the track. Try the provider first, then the same two sources Poweramp uses.
+   */
+  private fun readCurrentLyrics(realId: Long, path: String): String {
+    readProviderLyrics(realId).takeIf { it.isNotBlank() }?.let { return it }
+    readSidecarLrc(path).takeIf { it.isNotBlank() }?.let { return it }
+    return readEmbeddedLyrics(path)
+  }
+
+  private fun readProviderLyrics(realId: Long): String {
+    if (realId <= 0L || !refreshAvailability()) return ""
+    val uri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("files")
+      .appendEncodedPath(realId.toString())
+      .build()
+    return runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf("lyrics_synced", "lyrics"),
+        null,
+        null,
+        null
+      )?.use { cursor ->
+        if (cursor.moveToFirst()) {
+          cursor.firstNonBlank("lyrics_synced", "lyrics")
+        } else {
+          ""
+        }
+      }.orEmpty()
+    }.onFailure { error ->
+      // These optional columns are absent on older Poweramp builds. Sidecar/embedded fallbacks
+      // below still make lyrics available without making a normal request look like an error.
+      Timber.d(error, "Poweramp provider lyrics unavailable")
+    }.getOrDefault("")
+  }
+
+  private fun readSidecarLrc(path: String): String {
+    val source = localFileForPath(path) ?: return ""
+    val baseName = source.name.substringBeforeLast('.', source.name)
+    val parent = source.parentFile ?: return ""
+    val lrc = File(parent, "$baseName.lrc")
+    return runCatching {
+      if (lrc.isFile) lrc.readText(Charsets.UTF_8).trim() else ""
+    }.onFailure { error -> Timber.d(error, "Unable to read sidecar LRC") }
+      .getOrDefault("")
+  }
+
+  private fun readEmbeddedLyrics(path: String): String {
+    val source = localFileForPath(path) ?: return ""
+    return runCatching {
+      val retriever = MediaMetadataRetriever()
+      try {
+        retriever.setDataSource(source.absolutePath)
+        // METADATA_KEY_LYRIC is not available on every Android API stub, but its platform key
+        // is stable and MediaMetadataRetriever simply returns null when the container has none.
+        retriever.extractMetadata(METADATA_KEY_LYRIC).orEmpty().trim()
+      } finally {
+        retriever.release()
+      }
+    }.onFailure { error -> Timber.d(error, "Unable to read embedded lyrics") }
+      .getOrDefault("")
+  }
+
+  private fun localFileForPath(path: String): File? {
+    val uri = Uri.parse(path)
+    val file = when {
+      path.startsWith("/") -> File(path)
+      uri.scheme.equals("file", ignoreCase = true) -> uri.path?.let(::File)
+      else -> null
+    }
+    return file?.takeIf(File::isFile)
   }
 
   private fun handleTrack(intent: Intent, actionLabel: String) {
@@ -908,6 +1013,11 @@ class PowerampGateway(
     }
 
   private companion object {
+    // These framework broadcasts/extras are @hide, but are stable Android platform contracts.
+    const val ACTION_VOLUME_CHANGED = "android.media.VOLUME_CHANGED_ACTION"
+    const val EXTRA_VOLUME_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE"
+    // android.media.MediaMetadataRetriever.METADATA_KEY_LYRIC
+    const val METADATA_KEY_LYRIC = 1000
     const val NEGATIVE_COVER_CACHE_MS = 30_000L
     const val MAX_COVER_DIMENSION = 1024
     const val COVER_JPEG_QUALITY = 95
