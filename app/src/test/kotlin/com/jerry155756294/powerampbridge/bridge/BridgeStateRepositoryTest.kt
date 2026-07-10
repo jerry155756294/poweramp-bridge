@@ -18,7 +18,7 @@ class BridgeStateRepositoryTest {
     val stopped = repository.state.value
     assertFalse(stopped.shouldAutoStart(autoStartEnabled = true))
     assertTrue(stopped.manualStopActive)
-    assertEquals("Stopped manually", stopped.serviceStopSummary)
+    assertEquals("已手動停止", stopped.serviceStopSummary)
 
     repository.markServiceStarted()
 
@@ -37,7 +37,7 @@ class BridgeStateRepositoryTest {
     assertTrue(state.serviceRunning)
     assertTrue(state.serviceStopping)
     assertTrue(state.manualStopActive)
-    assertEquals("Manual stop requested", state.serviceStopSummary)
+    assertEquals("已要求手動停止", state.serviceStopSummary)
   }
 
   @Test
