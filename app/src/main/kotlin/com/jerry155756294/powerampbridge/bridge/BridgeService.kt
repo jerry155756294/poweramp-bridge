@@ -155,6 +155,7 @@ class BridgeService : Service() {
         lastCoverSignalTrackId = state.playback.track.realId
         lastCoverSignalRevision = state.coverSignalRevision
         lastLyricsSignalTrackKey = lyricsTrackKey(state)
+        stateRepository.recordProtocolEvent("lyrics_initial_broadcast:track=${lyricsTrackKey(state)}")
         return initialMessages + adapter.lyricsMessage()
       }
 
@@ -357,6 +358,9 @@ class BridgeService : Service() {
               server.sendBroadcast(messages)
             }
             if (shouldSendLyricsSignal) {
+              app.appContainer.stateRepository.recordProtocolEvent(
+                "lyrics_track_broadcast:track=$lyricsTrackKey"
+              )
               server.sendBroadcast(listOf(adapter.lyricsMessage()))
             }
             if (statusChanged && senderOverride != null) {

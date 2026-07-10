@@ -334,7 +334,7 @@ class MbrcProtocolAdapter(
 
   private fun pagedRadioPayload(request: PageRequest): Map<String, Any> {
     val stations = powerampGateway.readRadioStations()
-    stateRepository.recordProtocolEvent("radio_reply_source:poweramp_streams total=${stations.size}")
+    stateRepository.recordProtocolEvent("radio_reply_source:poweramp_radio total=${stations.size}")
     val items = stations.map { station ->
       linkedMapOf(
         "name" to station.name,

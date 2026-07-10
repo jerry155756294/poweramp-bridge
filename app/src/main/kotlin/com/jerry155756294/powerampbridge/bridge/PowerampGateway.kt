@@ -210,6 +210,35 @@ class PowerampGateway(
       return emptyList()
     }
 
+    val streamStations = readStoredRadioStations()
+    if (streamStations.isNotEmpty()) {
+      stateRepository.recordPowerampEvent("Radio query source=poweramp_streams total=${streamStations.size}")
+      return streamStations
+    }
+
+    // Poweramp can load a radio M3U directly into its current queue without creating a row in
+    // the /streams collection. This is how the shown "playlist: radiopara..." stream is stored.
+    val queuedStations = readQueueItems()
+      .asSequence()
+      .filter { it.path.isHttpUrl() }
+      .mapIndexed { index, item ->
+        PowerampRadioStation(
+          streamId = item.fileId ?: -(index + 1L),
+          name = item.title.ifBlank { item.artist }.ifBlank { item.path },
+          url = item.path,
+          artist = item.artist,
+          album = item.album
+        )
+      }
+      .toList()
+      .normalizeRadioStations()
+    stateRepository.recordPowerampEvent(
+      "Radio query source=${if (queuedStations.isEmpty()) "poweramp_queue_empty" else "poweramp_queue"} total=${queuedStations.size}"
+    )
+    return queuedStations
+  }
+
+  private fun readStoredRadioStations(): List<PowerampRadioStation> {
     val uri = PowerampAPI.ROOT_URI.buildUpon()
       .appendEncodedPath("streams")
       .build()
@@ -243,13 +272,7 @@ class PowerampGateway(
             )
           }
         }
-      }?.asSequence()
-        // Empty URLs cannot be played by MBRC, so don't let them replace its cached list.
-        ?.filter { it.url.isNotBlank() }
-        ?.distinctBy { it.url.trim().lowercase() }
-        ?.sortedBy { it.name.lowercase() }
-        ?.toList()
-        ?: emptyList()
+      }?.normalizeRadioStations() ?: emptyList()
     }.onFailure { error ->
       Timber.w(error, "Failed querying Poweramp streams")
       stateRepository.recordPowerampEvent(
@@ -295,18 +318,12 @@ class PowerampGateway(
       return false
     }
 
-    val matchedStream = readRadioStations().firstOrNull { it.url.equals(trimmed, ignoreCase = true) }
-    val uri = if (matchedStream != null) {
-      PowerampAPI.ROOT_URI.buildUpon()
-        .appendEncodedPath("streams")
-        .appendEncodedPath(matchedStream.streamId.toString())
-        .build()
-    } else {
-      parsePlayableUri(trimmed)
-    } ?: return false
+    // Poweramp explicitly supports http(s) data URIs for OPEN_TO_PLAY. Using the URL directly
+    // also works for playlist-backed radios, which have no usable /streams row to address.
+    val uri = parsePlayableUri(trimmed) ?: return false
 
     stateRepository.recordPowerampEvent(
-      "Path play dispatch: source=${if (matchedStream != null) "stream_id" else "direct_uri"} target=$uri"
+      "Path play dispatch: source=direct_uri target=$uri"
     )
     return openToPlay(uri)
   }
@@ -1052,6 +1069,17 @@ private fun Cursor.firstNonBlank(vararg columnNames: String): String {
   }
   return ""
 }
+
+private fun List<PowerampRadioStation>.normalizeRadioStations(): List<PowerampRadioStation> =
+  asSequence()
+    // Empty/non-network paths cannot be selected and played from MBRC's Radio screen.
+    .filter { it.url.isHttpUrl() }
+    .distinctBy { it.url.trim().lowercase() }
+    .sortedBy { it.name.lowercase() }
+    .toList()
+
+private fun String.isHttpUrl(): Boolean =
+  startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
 
 internal object PowerampBroadcastDiagnostics {
   fun extractDurationMs(track: Bundle): Long {
