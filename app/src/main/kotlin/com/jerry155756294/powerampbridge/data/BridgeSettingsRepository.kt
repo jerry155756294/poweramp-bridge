@@ -21,7 +21,9 @@ class BridgeSettingsRepository(
       startOnBoot = preferences[Keys.StartOnBoot] ?: false,
       foregroundPersistent = preferences[Keys.ForegroundPersistent] ?: true,
       minimalForegroundNotification = preferences[Keys.MinimalForegroundNotification] ?: false,
-      advancedDiagnosticsEnabled = preferences[Keys.AdvancedDiagnosticsEnabled] ?: false
+      advancedDiagnosticsEnabled = preferences[Keys.AdvancedDiagnosticsEnabled] ?: false,
+      powerampDataAccessPermissionRequested =
+        preferences[Keys.PowerampDataAccessPermissionRequested] ?: false
     )
   }
 
@@ -49,6 +51,10 @@ class BridgeSettingsRepository(
     context.dataStore.edit { it[Keys.AdvancedDiagnosticsEnabled] = enabled }
   }
 
+  suspend fun markPowerampDataAccessPermissionRequested() {
+    context.dataStore.edit { it[Keys.PowerampDataAccessPermissionRequested] = true }
+  }
+
   private object Keys {
     val Port: Preferences.Key<Int> = intPreferencesKey("port")
     val AutoStart: Preferences.Key<Boolean> = booleanPreferencesKey("auto_start")
@@ -59,5 +65,7 @@ class BridgeSettingsRepository(
       booleanPreferencesKey("minimal_foreground_notification")
     val AdvancedDiagnosticsEnabled: Preferences.Key<Boolean> =
       booleanPreferencesKey("advanced_diagnostics_enabled")
+    val PowerampDataAccessPermissionRequested: Preferences.Key<Boolean> =
+      booleanPreferencesKey("poweramp_data_access_permission_requested")
   }
 }

@@ -57,8 +57,8 @@ internal class BridgeNotificationPresenter(
   fun snapshot(state: BridgeUiState): NotificationSnapshot =
     NotificationSnapshot(
       title = when {
-        state.serviceStopping -> "Poweramp Bridge stopping"
-        state.manualStopActive && !state.serviceRunning -> "Poweramp Bridge stopped manually"
+        state.serviceStopping -> "Poweramp Bridge 正在停止"
+        state.manualStopActive && !state.serviceRunning -> "Poweramp Bridge 已手動停止"
         state.listenerActive -> textResources.bridgeTitle
         else -> textResources.bridgeStoppedTitle
       },
@@ -73,18 +73,18 @@ internal class BridgeNotificationPresenter(
         state.serviceStopSummary ?: textResources.bridgeMinimalSubtext
       } else {
         state.serviceStopSummary ?: buildList {
-        add("Port ${state.listenPort}")
-        state.activeClient?.let { add("Client $it") }
+        add("連接埠 ${state.listenPort}")
+        state.activeClient?.let { add("主端 $it") }
         state.clientId?.let { add("ID $it") }
         add(
           when {
-            state.broadcastInitialized -> "Broadcast ready"
-            state.broadcastSocketConnected -> "Broadcast waiting init"
-            else -> "No broadcast socket"
+            state.broadcastInitialized -> "廣播已就緒"
+            state.broadcastSocketConnected -> "廣播等待初始化"
+            else -> "沒有廣播 Socket"
           }
         )
         if (state.requestSocketConnected) {
-          add("Request ${state.activeRequestSocketCount}")
+          add("請求 ${state.activeRequestSocketCount}")
         }
       }.joinToString(" | ")
       },

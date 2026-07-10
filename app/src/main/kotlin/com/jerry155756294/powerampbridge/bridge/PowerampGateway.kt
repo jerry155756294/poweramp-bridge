@@ -61,7 +61,7 @@ class PowerampGateway(
       }.onFailure { error ->
         Timber.e(error, "Failed handling Poweramp broadcast: %s", intent.action)
         stateRepository.setError(
-          "Poweramp broadcast failed: ${error.message ?: error.javaClass.simpleName}"
+          "Poweramp 廣播處理失敗：${error.message ?: error.javaClass.simpleName}"
         )
         stateRepository.recordPowerampEvent(
           "Broadcast failure on $actionLabel extras=$extrasSummary ${error.javaClass.simpleName}: ${error.message ?: "no-message"}"
@@ -107,6 +107,9 @@ class PowerampGateway(
     stateRepository.setPowerampAvailable(available)
     return available
   }
+
+  fun requestDataAccessPermission(): Boolean =
+    PowerampDataAccess.request(context, stateRepository)
 
   fun requestPositionSync() {
     sendCommand(PowerampAPI.Commands.POS_SYNC)
@@ -196,9 +199,15 @@ class PowerampGateway(
             )
           }
         }
+      }?.also {
+        stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.AVAILABLE)
       } ?: emptyList()
     }.onFailure { error ->
       Timber.w(error, "Failed querying Poweramp queue")
+      stateRepository.setPowerampDataAccess(
+        PowerampDataAccessStatus.FAILED,
+        "無法讀取 Poweramp 清單：${error.javaClass.simpleName}"
+      )
       stateRepository.recordPowerampEvent(
         "Queue query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
       )
@@ -272,9 +281,15 @@ class PowerampGateway(
             )
           }
         }
+      }?.also {
+        stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.AVAILABLE)
       }?.normalizeRadioStations() ?: emptyList()
     }.onFailure { error ->
       Timber.w(error, "Failed querying Poweramp streams")
+      stateRepository.setPowerampDataAccess(
+        PowerampDataAccessStatus.FAILED,
+        "無法讀取 Poweramp 廣播清單：${error.javaClass.simpleName}"
+      )
       stateRepository.recordPowerampEvent(
         "Radio query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
       )
@@ -661,7 +676,7 @@ class PowerampGateway(
 
   private fun sendCommand(command: Int, configure: (Intent) -> Unit = {}): Boolean {
     if (!refreshAvailability()) {
-      stateRepository.setError("Poweramp not available")
+      stateRepository.setError("找不到 Poweramp")
       return false
     }
 
@@ -673,7 +688,7 @@ class PowerampGateway(
     if (result) {
       stateRepository.recordPowerampEvent("api_command_sent:${commandLabel(command)}")
     } else {
-      stateRepository.setError("Failed to send Poweramp command $command")
+      stateRepository.setError("無法傳送 Poweramp 命令 $command")
     }
     return result
   }

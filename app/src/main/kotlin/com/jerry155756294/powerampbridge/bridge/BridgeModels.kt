@@ -134,6 +134,8 @@ data class BridgeUiState(
   val listenPort: Int = 3000,
   val localAddresses: List<String> = emptyList(),
   val powerampAvailable: Boolean = false,
+  val powerampDataAccess: PowerampDataAccessStatus = PowerampDataAccessStatus.NOT_REQUESTED,
+  val powerampDataAccessDetail: String? = null,
   val activeClient: String? = null,
   val clientId: String? = null,
   val protocolVersion: Int? = null,
@@ -161,14 +163,21 @@ data class BridgeUiState(
   val lastError: String? = null
 )
 
+enum class PowerampDataAccessStatus {
+  NOT_REQUESTED,
+  REQUESTED,
+  AVAILABLE,
+  FAILED
+}
+
 internal fun BridgeUiState.shouldAutoStart(autoStartEnabled: Boolean): Boolean =
   autoStartEnabled && !serviceRunning && !serviceStopping && !manualStopActive
 
 internal fun BridgeUiState.serviceStatusLabel(): String = when {
-  serviceStopping -> "Stopping"
-  serviceRunning -> "Running"
-  manualStopActive -> "Stopped manually"
-  else -> "Stopped"
+  serviceStopping -> "正在停止"
+  serviceRunning -> "執行中"
+  manualStopActive -> "已手動停止"
+  else -> "已停止"
 }
 
 internal fun BridgeUiState.withSession(snapshot: LogicalClientSnapshot?): BridgeUiState =

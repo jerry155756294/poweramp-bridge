@@ -240,6 +240,10 @@ class BridgeService : Service() {
         activeSettings = settings
         notificationPresenter.foregroundPersistent = settings.foregroundPersistent
         notificationPresenter.minimalMode = settings.minimalForegroundNotification
+        if (!settings.powerampDataAccessPermissionRequested) {
+          powerampGateway.requestDataAccessPermission()
+          app.appContainer.settingsRepository.markPowerampDataAccessPermissionRequested()
+        }
         lastObservedState?.let { state ->
           val notificationSnapshot = notificationPresenter.snapshot(state)
           if (notificationSnapshot != lastNotificationSnapshot) {
@@ -258,7 +262,7 @@ class BridgeService : Service() {
               app.appContainer.stateRepository.setError(null)
             }.onFailure { error ->
               app.appContainer.stateRepository.setListenerState(false, settings.port)
-              app.appContainer.stateRepository.setError(error.message ?: "Failed to start listener")
+              app.appContainer.stateRepository.setError(error.message ?: "無法啟動監聽器")
             }
           }
         }

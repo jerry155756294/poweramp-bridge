@@ -29,8 +29,8 @@ class BridgeStateRepository {
       it.copy(
         serviceStopping = true,
         manualStopActive = true,
-        serviceStopSummary = "Manual stop requested",
-        serviceStopDetail = "Bridge is stopping and will stay stopped until started again."
+        serviceStopSummary = "已要求手動停止",
+        serviceStopDetail = "Bridge 正在停止，直到你再次啟動前都會保持停止。"
       )
     }
   }
@@ -42,11 +42,11 @@ class BridgeStateRepository {
         serviceRunning = true,
         serviceStopping = true,
         manualStopActive = manualStop,
-        serviceStopSummary = if (manualStop) "Manual stop requested" else "Bridge stopping",
+        serviceStopSummary = if (manualStop) "已要求手動停止" else "Bridge 正在停止",
         serviceStopDetail = if (manualStop) {
-          "Bridge is stopping and will stay stopped until started again."
+          "Bridge 正在停止，直到你再次啟動前都會保持停止。"
         } else {
-          "Bridge is shutting down."
+          "Bridge 正在關閉。"
         }
       )
     }
@@ -59,9 +59,9 @@ class BridgeStateRepository {
         serviceRunning = false,
         serviceStopping = false,
         manualStopActive = manualStop,
-        serviceStopSummary = if (manualStop) "Stopped manually" else "Bridge stopped",
+        serviceStopSummary = if (manualStop) "已手動停止" else "Bridge 已停止",
         serviceStopDetail = if (manualStop) {
-          "Auto start is paused until you start the bridge again."
+          "自動啟動已暫停，直到你再次啟動 Bridge。"
         } else {
           null
         }
@@ -115,6 +115,19 @@ class BridgeStateRepository {
         powerampAvailable = available,
         playback = it.playback.copy(powerampAvailable = available)
       )
+    }
+  }
+
+  fun setPowerampDataAccess(status: PowerampDataAccessStatus, detail: String? = null) {
+    _state.update { current ->
+      if (current.powerampDataAccess == status && current.powerampDataAccessDetail == detail) {
+        current
+      } else {
+        current.copy(
+        powerampDataAccess = status,
+        powerampDataAccessDetail = detail
+        )
+      }
     }
   }
 
