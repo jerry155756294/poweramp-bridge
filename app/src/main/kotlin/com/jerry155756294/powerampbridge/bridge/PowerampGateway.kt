@@ -255,16 +255,34 @@ class PowerampGateway(
 
   private fun libraryQueryDefinition(context: String): LibraryQueryDefinition? = when (context) {
     "browsegenres" -> LibraryQueryDefinition(
-      "genres", arrayOf("${TableDefs.Genres.GENRE} AS genre"), "${TableDefs.Genres.GENRE} COLLATE NOCASE"
-    ) { cursor -> linkedMapOf("genre" to cursor.stringOrBlank("genre")) }
+      "genres",
+      arrayOf(
+        TableDefs.Genres.GENRE,
+        TableDefs.Genres.NUM_FILES.substringAfterLast('.') + " AS count"
+      ),
+      "${TableDefs.Genres.GENRE} COLLATE NOCASE"
+    ) { cursor -> linkedMapOf(
+      "genre" to cursor.stringOrBlank("genre"),
+      "count" to (cursor.longOrNull("count") ?: 0L).toInt()
+    ) }
     "browseartists" -> LibraryQueryDefinition(
-      "artists", arrayOf("${TableDefs.Artists.ARTIST} AS artist"), "${TableDefs.Artists.ARTIST} COLLATE NOCASE"
-    ) { cursor -> linkedMapOf("artist" to cursor.stringOrBlank("artist")) }
+      "artists",
+      arrayOf(
+        TableDefs.Artists.ARTIST,
+        TableDefs.Artists.NUM_FILES.substringAfterLast('.') + " AS count"
+      ),
+      "${TableDefs.Artists.ARTIST} COLLATE NOCASE"
+    ) { cursor -> linkedMapOf(
+      "artist" to cursor.stringOrBlank("artist"),
+      "count" to (cursor.longOrNull("count") ?: 0L).toInt()
+    ) }
     "browsealbums" -> LibraryQueryDefinition(
-      "albums", arrayOf(
-        "${TableDefs.Albums.ALBUM} AS album",
-        "${TableDefs.Albums.NUM_FILES} AS count"
-      ), "${TableDefs.Albums.ALBUM} COLLATE NOCASE"
+      "albums",
+      arrayOf(
+        TableDefs.Albums.ALBUM,
+        TableDefs.Albums.NUM_FILES.substringAfterLast('.') + " AS count"
+      ),
+      "${TableDefs.Albums.ALBUM} COLLATE NOCASE"
     ) { cursor -> linkedMapOf(
       // The /albums provider endpoint deliberately exposes album columns only. Do not use
       // ad-hoc joins here: several Poweramp versions reject them with SQLiteException.
@@ -332,25 +350,27 @@ class PowerampGateway(
   }
 
   private fun readLibraryGenreArtists(genre: String): List<Map<String, Any?>> {
-    // Genres are a category relation in Poweramp; unlike /files, the category endpoint
-    // exposes the relation without requiring an unsupported SQL join.
+    // Genres are a category relation in Poweramp. There is no stable
+    // /genres/{id}/artists endpoint across provider versions, so enumerate the
+    // documented /genres/{id}/files endpoint and aggregate the artist tag.
     val genreUri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("genres").build()
     val genreId = context.contentResolver.query(
       genreUri, arrayOf("${TableDefs.Genres._ID} AS genre_id"), "${TableDefs.Genres.GENRE}=?",
       arrayOf(genre), null
     )?.use { cursor -> if (cursor.moveToFirst()) cursor.longOrNull("genre_id") else null } ?: return emptyList()
-    val artistsUri = PowerampAPI.ROOT_URI.buildUpon()
-      .appendEncodedPath("genres").appendEncodedPath(genreId.toString()).appendEncodedPath("artists").build()
+    val filesUri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("genres").appendEncodedPath(genreId.toString()).appendEncodedPath("files").build()
     return context.contentResolver.query(
-      artistsUri,
-      arrayOf("${TableDefs.Artists.ARTIST} AS artist", "${TableDefs.Artists.NUM_FILES} AS count"),
-      null, null, "${TableDefs.Artists.ARTIST} COLLATE NOCASE"
+      filesUri,
+      arrayOf("${TableDefs.Files.ARTIST_TAG} AS artist"),
+      null, null, "${TableDefs.Files.ARTIST_TAG} COLLATE NOCASE"
     )?.use { cursor ->
-      buildList {
-        while (cursor.moveToNext()) add(
-          mapOf("artist" to cursor.stringOrBlank("artist"), "count" to (cursor.longOrNull("count") ?: 0L).toInt())
-        )
+      val counts = linkedMapOf<String, Int>()
+      while (cursor.moveToNext()) {
+        val artist = cursor.stringOrBlank("artist")
+        if (artist.isNotBlank()) counts[artist] = (counts[artist] ?: 0) + 1
       }
+      counts.map { (artist, count) -> mapOf("artist" to artist, "count" to count) }
     } ?: emptyList()
   }
 
@@ -383,11 +403,17 @@ class PowerampGateway(
     val uri = PowerampAPI.AA_ROOT_URI.buildUpon().appendEncodedPath("files").appendEncodedPath(realId.toString()).build()
     val result = loadScaledCoverBase64Detailed(uri, size, LIBRARY_COVER_JPEG_QUALITY)
     val base64 = (result as? CoverLoadResult.Ready)?.base64 ?: return null
-    return LibraryCoverCacheEntry(base64, sha1(Base64.decode(base64, Base64.NO_WRAP)))
+    // Include the requested size in the validator. If the source image is already
+    // smaller than two requested sizes, the encoded bytes may be identical; a
+    // byte-only hash would then incorrectly return 304 for the wrong variant.
+    return LibraryCoverCacheEntry(base64, sha1(size, Base64.decode(base64, Base64.NO_WRAP)))
   }
 
-  private fun sha1(bytes: ByteArray): String = MessageDigest.getInstance("SHA-1").digest(bytes)
-    .joinToString("") { "%02x".format(it) }
+  private fun sha1(size: Int, bytes: ByteArray): String {
+    val digest = MessageDigest.getInstance("SHA-1")
+    digest.update("mbrc-cover-v1:$size:".toByteArray(Charsets.UTF_8))
+    return digest.digest(bytes).joinToString("") { "%02x".format(it) }
+  }
 
   override fun readQueueItems(): List<PowerampQueueItem> {
     if (!refreshAvailability()) {
