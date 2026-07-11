@@ -80,19 +80,23 @@ object PowerampDataAccess {
 
   private fun probe(context: Context, stateRepository: BridgeStateRepository): Boolean {
     val uri = PowerampAPI.ROOT_URI.buildUpon()
-      .appendEncodedPath("streams")
-      .appendQueryParameter("lim", "1")
+      // Probe the same minimal category query used by the library sync. The
+      // streams collection is optional and some Poweramp builds return a null
+      // cursor for it even when library access is already granted.
+      .appendEncodedPath("albums")
       .build()
     return runCatching {
       requireNotNull(
         context.contentResolver.query(
           uri,
-          arrayOf(TableDefs.Files._ID),
+          arrayOf(TableDefs.Albums._ID, TableDefs.Albums.ALBUM),
           null,
           null,
-          null
+          TableDefs.Albums.ALBUM
         )
-      ) { "Poweramp did not return a cursor" }.use { }
+      ) { "Poweramp did not return a cursor for /albums" }.use { cursor ->
+        stateRepository.recordProtocolEvent("data_access_probe_rows:${cursor.count}")
+      }
       stateRepository.setPowerampDataAccess(
         PowerampDataAccessStatus.AVAILABLE,
         "已確認可讀取 Poweramp 的廣播清單。"

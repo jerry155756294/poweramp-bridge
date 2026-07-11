@@ -287,16 +287,19 @@ class PowerampGateway(
     "browsealbums" -> LibraryQueryDefinition(
       "albums",
       arrayOf(
-        TableDefs.Albums.ALBUM,
-        TableDefs.Albums.NUM_FILES.substringAfterLast('.') + " AS count"
+        // Keep this projection identical to Poweramp's official API example.
+        // Some provider builds expose `album`/`_id` but reject the otherwise
+        // documented `num_files` column with SQLiteException.
+        TableDefs.Albums._ID,
+        TableDefs.Albums.ALBUM
       ),
-      "${TableDefs.Albums.ALBUM} COLLATE NOCASE"
+      TableDefs.Albums.ALBUM
     ) { cursor -> linkedMapOf(
       // The /albums provider endpoint deliberately exposes album columns only. Do not use
       // ad-hoc joins here: several Poweramp versions reject them with SQLiteException.
       "album" to cursor.stringOrBlank("album"),
       "artist" to firstArtistForAlbum(cursor.stringOrBlank("album")),
-      "count" to (cursor.longOrNull("count") ?: 0L).toInt()
+      "count" to countTracksForAlbum(cursor.stringOrBlank("album"))
     ) }
     "browsetracks" -> LibraryQueryDefinition(
       "files", arrayOf(
@@ -361,6 +364,20 @@ class PowerampGateway(
     if (album.isBlank()) return trackArtist
     return libraryAlbumArtistCache[album]
       ?: firstArtistForAlbum(album).ifBlank { trackArtist }
+  }
+
+  private fun countTracksForAlbum(album: String): Int {
+    if (album.isBlank()) return 0
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
+    return runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf(TableDefs.Files._ID),
+        "${TableDefs.Files.ALBUM_TAG}=?",
+        arrayOf(album),
+        TableDefs.Files._ID
+      )?.use { cursor -> cursor.count } ?: 0
+    }.getOrDefault(0)
   }
 
   private fun albumArtistName(id: Long): String {
