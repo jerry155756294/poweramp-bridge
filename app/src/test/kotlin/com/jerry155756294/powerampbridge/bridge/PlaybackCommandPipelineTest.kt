@@ -51,6 +51,10 @@ class PlaybackCommandPipelineTest {
     override fun currentLyricsPayload(): Map<String, Any> = mapOf("status" to 404, "lyrics" to "")
     override fun readQueueItems(): List<PowerampQueueItem> = emptyList()
     override fun readRadioStations(): List<PowerampRadioStation> = emptyList()
+    override fun readLibraryPage(context: String, offset: Int, limit: Int): PowerampLibraryPage =
+      PowerampLibraryPage(0, offset, limit, emptyList())
+    override fun readLibraryCover(request: Map<*, *>?): Map<String, Any?> =
+      mapOf("status" to 404, "cover" to null)
     override fun playPause(): Boolean {
       playPauseCalls += 1
       return true

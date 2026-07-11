@@ -120,15 +120,26 @@ class MbrcProtocolAdapter(
       ProtocolConstants.RadioStations ->
         listOf(codec.encode(ProtocolConstants.RadioStations, pagedRadioPayload(pageRequest(message.data))))
 
-      ProtocolConstants.PlaylistList,
+      ProtocolConstants.PlaylistList ->
+        listOf(codec.encode(message.context, emptyPage(pageRequest(message.data))))
+
       ProtocolConstants.BrowseGenres,
       ProtocolConstants.BrowseArtists,
       ProtocolConstants.BrowseAlbums,
-      ProtocolConstants.BrowseTracks ->
-        listOf(codec.encode(message.context, emptyPage(pageRequest(message.data))))
+      ProtocolConstants.BrowseTracks -> {
+        val request = pageRequest(message.data)
+        val page = powerampGateway.readLibraryPage(message.context, request.offset, request.limit)
+        if (!page.available) commandUnavailable(message.context)
+        else listOf(codec.encode(message.context, mapOf(
+          "total" to page.total,
+          "offset" to page.offset,
+          "limit" to page.limit,
+          "data" to page.data
+        )))
+      }
 
       ProtocolConstants.LibraryCover ->
-        listOf(codec.encode(ProtocolConstants.LibraryCover, mapOf("status" to 404, "cover" to null)))
+        listOf(codec.encode(ProtocolConstants.LibraryCover, powerampGateway.readLibraryCover(message.data as? Map<*, *>)))
 
       ProtocolConstants.PlayerOutput,
       ProtocolConstants.PlayerOutputSwitch ->

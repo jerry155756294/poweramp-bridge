@@ -4,6 +4,7 @@ import com.jerry155756294.powerampbridge.bridge.BridgeStateRepository
 import com.jerry155756294.powerampbridge.bridge.PowerampQueueItem
 import com.jerry155756294.powerampbridge.bridge.PowerampRadioStation
 import com.jerry155756294.powerampbridge.bridge.PowerampController
+import com.jerry155756294.powerampbridge.bridge.PowerampLibraryPage
 import com.jerry155756294.powerampbridge.bridge.QueueCommandResult
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -96,6 +97,48 @@ class MbrcProtocolAdapterTest {
       assertFalse(data.getBoolean("accepted"))
       assertTrue(data.getBoolean("unsupported"))
     }
+  }
+
+  @Test
+  fun `browsealbums returns the gateway page instead of an empty compatibility page`() {
+    controller.libraryPages = mapOf(
+      ProtocolConstants.BrowseAlbums to PowerampLibraryPage(
+        total = 1,
+        offset = 0,
+        limit = 800,
+        data = listOf(mapOf("artist" to "Artist", "album" to "Album", "count" to 2))
+      )
+    )
+
+    val data = JSONObject(adapter.handleCommand(IncomingMessage(ProtocolConstants.BrowseAlbums, null)).single())
+      .getJSONObject("data")
+
+    assertEquals(1, data.getInt("total"))
+    assertEquals("Album", data.getJSONArray("data").getJSONObject(0).getString("album"))
+  }
+
+  @Test
+  fun `unavailable Poweramp library page fails sync rather than reporting an empty library`() {
+    controller.libraryPages = mapOf(
+      ProtocolConstants.BrowseTracks to PowerampLibraryPage(0, 0, 800, emptyList(), available = false)
+    )
+
+    val reply = JSONObject(adapter.handleCommand(IncomingMessage(ProtocolConstants.BrowseTracks, null)).single())
+
+    assertEquals(ProtocolConstants.CommandUnavailable, reply.getString("context"))
+    assertEquals(ProtocolConstants.BrowseTracks, reply.getString("data"))
+  }
+
+  @Test
+  fun `library cover is delegated with its hash request`() {
+    controller.libraryCoverPayload = mapOf("status" to 304, "cover" to null, "hash" to "same")
+
+    val data = JSONObject(
+      adapter.handleCommand(IncomingMessage(ProtocolConstants.LibraryCover, mapOf("artist" to "A", "album" to "B", "hash" to "same"))).single()
+    ).getJSONObject("data")
+
+    assertEquals(304, data.getInt("status"))
+    assertEquals("same", data.getString("hash"))
   }
 
   @Test
@@ -281,6 +324,8 @@ class MbrcProtocolAdapterTest {
     var coverPayloadCalls = 0
     var queueItems: List<PowerampQueueItem> = emptyList()
     var radioStations: List<PowerampRadioStation> = emptyList()
+    var libraryPages: Map<String, PowerampLibraryPage> = emptyMap()
+    var libraryCoverPayload: Map<String, Any?> = mapOf("status" to 404, "cover" to null)
     var queueCommandResult: QueueCommandResult = QueueCommandResult(200, true, "ok")
     var lastQueueCommandType: String? = null
     var lastQueueCommandPaths: List<String>? = null
@@ -297,6 +342,9 @@ class MbrcProtocolAdapterTest {
     override fun currentLyricsPayload(): Map<String, Any> = lyricsPayload
     override fun readQueueItems(): List<PowerampQueueItem> = queueItems
     override fun readRadioStations(): List<PowerampRadioStation> = radioStations
+    override fun readLibraryPage(context: String, offset: Int, limit: Int): PowerampLibraryPage =
+      libraryPages[context] ?: PowerampLibraryPage(0, offset, limit, emptyList())
+    override fun readLibraryCover(request: Map<*, *>?): Map<String, Any?> = libraryCoverPayload
 
     override fun playPause(): Boolean = true
     override fun play(): Boolean = true

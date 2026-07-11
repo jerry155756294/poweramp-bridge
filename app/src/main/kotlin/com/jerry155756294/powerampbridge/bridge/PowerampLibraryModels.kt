@@ -22,3 +22,12 @@ data class QueueCommandResult(
   val accepted: Boolean,
   val detail: String
 )
+
+/** A read-only MBRC library response. A failure is deliberately distinct from an empty page. */
+data class PowerampLibraryPage(
+  val total: Int,
+  val offset: Int,
+  val limit: Int,
+  val data: List<Map<String, Any?>>,
+  val available: Boolean = true
+)

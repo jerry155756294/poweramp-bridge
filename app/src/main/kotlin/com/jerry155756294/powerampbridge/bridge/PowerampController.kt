@@ -7,6 +7,8 @@ interface PowerampController {
   fun currentLyricsPayload(): Map<String, Any>
   fun readQueueItems(): List<PowerampQueueItem>
   fun readRadioStations(): List<PowerampRadioStation>
+  fun readLibraryPage(context: String, offset: Int, limit: Int): PowerampLibraryPage
+  fun readLibraryCover(request: Map<*, *>?): Map<String, Any?>
   fun playPause(): Boolean
   fun play(): Boolean
   fun pause(): Boolean

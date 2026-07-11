@@ -19,6 +19,7 @@ import com.maxmpz.poweramp.player.PowerampAPIHelper
 import com.maxmpz.poweramp.player.TableDefs
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,8 @@ class PowerampGateway(
   private var coverLoadJob: Job? = null
   private var coverLoadGeneration: Long = 0L
   private val negativeCoverCache = ConcurrentHashMap<Long, NegativeCoverCacheEntry>()
+  private val libraryCoverCache = ConcurrentHashMap<String, LibraryCoverCacheEntry>()
+  private val missingLibraryCoverCache = ConcurrentHashMap<String, Long>()
   private val coverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   @Volatile
   private var activeRadioCategory: ActiveRadioCategory? = null
@@ -162,6 +165,124 @@ class PowerampGateway(
     )
     return mapOf("status" to status, "lyrics" to lyrics)
   }
+
+  override fun readLibraryPage(libraryContext: String, offset: Int, limit: Int): PowerampLibraryPage {
+    if (!refreshAvailability()) return unavailableLibraryPage(offset, limit, "poweramp_unavailable")
+    val definition = libraryQueryDefinition(libraryContext)
+      ?: return unavailableLibraryPage(offset, limit, "unknown_context=$libraryContext")
+    return runCatching {
+      context.contentResolver.query(
+        definition.uri,
+        definition.projection,
+        null,
+        null,
+        definition.sortOrder
+      )?.use { cursor ->
+        val total = cursor.count
+        val data = buildList {
+          if (offset < total && cursor.moveToPosition(offset)) {
+            do {
+              add(definition.mapper(cursor))
+            } while (size < limit && cursor.moveToNext())
+          }
+        }
+        stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.AVAILABLE)
+        stateRepository.recordProtocolEvent("library_reply:$libraryContext total=$total offset=$offset count=${data.size}")
+        PowerampLibraryPage(total, offset, limit, data)
+      } ?: unavailableLibraryPage(offset, limit, "null_cursor")
+    }.onFailure { error ->
+      Timber.w(error, "Poweramp library query failed: %s", libraryContext)
+      stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.FAILED, error.javaClass.simpleName)
+      stateRepository.recordPowerampEvent("Library query failed $libraryContext: ${error.javaClass.simpleName}")
+    }.getOrElse { unavailableLibraryPage(offset, limit, it.javaClass.simpleName) }
+  }
+
+  override fun readLibraryCover(request: Map<*, *>?): Map<String, Any?> {
+    val artist = request?.get("artist") as? String ?: ""
+    val album = request?.get("album") as? String ?: ""
+    if (album.isBlank()) return mapOf("status" to 400, "cover" to null)
+    if (!refreshAvailability()) return mapOf("status" to 503, "cover" to null)
+    val size = ((request?.get("size") as? Number)?.toInt() ?: (request?.get("size") as? String)?.toIntOrNull() ?: DEFAULT_LIBRARY_COVER_SIZE)
+      .coerceIn(MIN_LIBRARY_COVER_SIZE, MAX_LIBRARY_COVER_SIZE)
+    val requestHash = request?.get("hash") as? String
+    val albumKey = "$artist\u0000$album"
+    val missingUntil = missingLibraryCoverCache[albumKey]
+    if (missingUntil != null && missingUntil > SystemClock.elapsedRealtime()) {
+      return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
+    }
+    val realId = findLibraryCoverRealId(artist, album) ?: run {
+      missingLibraryCoverCache[albumKey] = SystemClock.elapsedRealtime() + NEGATIVE_COVER_CACHE_MS
+      return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
+    }
+    val cacheKey = "$albumKey\u0000$realId\u0000$size"
+    val cached = libraryCoverCache[cacheKey] ?: loadLibraryCover(realId, size)?.also {
+      libraryCoverCache[cacheKey] = it
+      missingLibraryCoverCache.remove(albumKey)
+    } ?: run {
+      missingLibraryCoverCache[albumKey] = SystemClock.elapsedRealtime() + NEGATIVE_COVER_CACHE_MS
+      return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
+    }
+    if (requestHash == cached.hash) {
+      return mapOf("status" to 304, "artist" to artist, "album" to album, "cover" to null, "hash" to cached.hash)
+    }
+    return mapOf("status" to 200, "artist" to artist, "album" to album, "cover" to cached.base64, "hash" to cached.hash)
+  }
+
+  private fun unavailableLibraryPage(offset: Int, limit: Int, detail: String): PowerampLibraryPage {
+    stateRepository.recordProtocolEvent("library_unavailable:$detail")
+    return PowerampLibraryPage(0, offset, limit, emptyList(), available = false)
+  }
+
+  private fun libraryQueryDefinition(context: String): LibraryQueryDefinition? = when (context) {
+    "browsegenres" -> LibraryQueryDefinition(
+      "genres", arrayOf("${TableDefs.Genres.GENRE} AS genre"), "${TableDefs.Genres.GENRE} COLLATE NOCASE"
+    ) { cursor -> linkedMapOf("genre" to cursor.stringOrBlank("genre")) }
+    "browseartists" -> LibraryQueryDefinition(
+      "artists", arrayOf("${TableDefs.Artists.ARTIST} AS artist"), "${TableDefs.Artists.ARTIST} COLLATE NOCASE"
+    ) { cursor -> linkedMapOf("artist" to cursor.stringOrBlank("artist")) }
+    "browsealbums" -> LibraryQueryDefinition(
+      "albums", arrayOf(
+        "${TableDefs.Albums.ALBUM} AS album",
+        "COALESCE(${TableDefs.AlbumArtists.ALBUM_ARTIST}, (SELECT artist_tag FROM ${TableDefs.Files.TABLE} WHERE ${TableDefs.Files.ALBUM_ID}=${TableDefs.Albums._ID} ORDER BY ${TableDefs.Files._ID} LIMIT 1), '') AS artist",
+        "${TableDefs.Albums.NUM_FILES} AS count"
+      ), "${TableDefs.Albums.ALBUM_SORT} COLLATE NOCASE"
+    ) { cursor -> linkedMapOf(
+      "album" to cursor.stringOrBlank("album"), "artist" to cursor.stringOrBlank("artist"),
+      "count" to (cursor.longOrNull("count") ?: 0L).toInt()
+    ) }
+    "browsetracks" -> LibraryQueryDefinition(
+      "files", arrayOf(
+        "${TableDefs.Files.FULL_PATH} AS src", "${TableDefs.Files.ARTIST_TAG} AS artist",
+        "${TableDefs.Files.TITLE_TAG} AS title", "${TableDefs.Files.TRACK_TAG} AS trackno",
+        "${TableDefs.Files.DISC} AS disc", "${TableDefs.Files.ALBUM_TAG} AS album",
+        "COALESCE(${TableDefs.AlbumArtists.ALBUM_ARTIST}, '') AS album_artist",
+        "${TableDefs.Genres.GENRE} AS genre"
+      ), "${TableDefs.Files.TITLE_TAG} COLLATE NOCASE, ${TableDefs.Files._ID}"
+    ) { cursor -> linkedMapOf(
+      "src" to cursor.stringOrBlank("src"), "artist" to cursor.stringOrBlank("artist"),
+      "title" to cursor.stringOrBlank("title"), "trackno" to (cursor.longOrNull("trackno") ?: 0L).toInt(),
+      "disc" to (cursor.longOrNull("disc") ?: 0L).toInt(), "album" to cursor.stringOrBlank("album"),
+      "album_artist" to cursor.stringOrBlank("album_artist"), "genre" to cursor.stringOrBlank("genre")
+    ) }
+    else -> null
+  }
+
+  private fun findLibraryCoverRealId(artist: String, album: String): Long? = runCatching {
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
+    context.contentResolver.query(uri, arrayOf("${TableDefs.Files._ID} AS real_id"),
+      "${TableDefs.Files.ALBUM_TAG}=? AND ${TableDefs.Files.ARTIST_TAG}=?", arrayOf(album, artist),
+      "${TableDefs.Files._ID} ASC")?.use { cursor -> if (cursor.moveToFirst()) cursor.longOrNull("real_id") else null }
+  }.getOrNull()
+
+  private fun loadLibraryCover(realId: Long, size: Int): LibraryCoverCacheEntry? {
+    val uri = PowerampAPI.AA_ROOT_URI.buildUpon().appendEncodedPath("files").appendEncodedPath(realId.toString()).build()
+    val result = loadScaledCoverBase64Detailed(uri, size, LIBRARY_COVER_JPEG_QUALITY)
+    val base64 = (result as? CoverLoadResult.Ready)?.base64 ?: return null
+    return LibraryCoverCacheEntry(base64, sha1(Base64.decode(base64, Base64.NO_WRAP)))
+  }
+
+  private fun sha1(bytes: ByteArray): String = MessageDigest.getInstance("SHA-1").digest(bytes)
+    .joinToString("") { "%02x".format(it) }
 
   override fun readQueueItems(): List<PowerampQueueItem> {
     if (!refreshAvailability()) {
@@ -1157,7 +1278,11 @@ class PowerampGateway(
     stateRepository.updateCoverState(next)
   }
 
-  private fun loadScaledCoverBase64Detailed(uri: Uri): CoverLoadResult {
+  private fun loadScaledCoverBase64Detailed(
+    uri: Uri,
+    maxDimension: Int = MAX_COVER_DIMENSION,
+    quality: Int = COVER_JPEG_QUALITY
+  ): CoverLoadResult {
     val startedAt = SystemClock.elapsedRealtime()
     return runCatching {
       val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1181,7 +1306,7 @@ class PowerampGateway(
         )
       }
 
-      val sampleSize = calculateSampleSize(bounds.outWidth, bounds.outHeight, MAX_COVER_DIMENSION)
+      val sampleSize = calculateSampleSize(bounds.outWidth, bounds.outHeight, maxDimension)
       val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
       val fdForBitmap = context.contentResolver.openFileDescriptor(uri, "r")
         ?: return CoverLoadResult.Missing(
@@ -1202,7 +1327,7 @@ class PowerampGateway(
         mime = bounds.outMimeType
       )
 
-      val base64 = bitmap.useScaledBase64()
+      val base64 = bitmap.useScaledBase64(maxDimension, quality)
       if (base64.isBlank()) {
         CoverLoadResult.Missing(
           reason = CoverMissingReason.ENCODE_EMPTY,
@@ -1223,11 +1348,11 @@ class PowerampGateway(
     }.withElapsed((SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L))
   }
 
-  private fun Bitmap.useScaledBase64(): String {
-    val scaled = scaleBitmapIfNeeded(this, MAX_COVER_DIMENSION)
+  private fun Bitmap.useScaledBase64(maxDimension: Int, quality: Int): String {
+    val scaled = scaleBitmapIfNeeded(this, maxDimension)
     return try {
       ByteArrayOutputStream().use { output ->
-        scaled.compress(Bitmap.CompressFormat.JPEG, COVER_JPEG_QUALITY, output)
+        scaled.compress(Bitmap.CompressFormat.JPEG, quality, output)
         Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
       }
     } finally {
@@ -1279,6 +1404,20 @@ class PowerampGateway(
     val mime: String? = null
   )
 
+  private data class LibraryCoverCacheEntry(
+    val base64: String,
+    val hash: String
+  )
+
+  private data class LibraryQueryDefinition(
+    val path: String,
+    val projection: Array<String>,
+    val sortOrder: String,
+    val mapper: (Cursor) -> Map<String, Any?>
+  ) {
+    val uri: Uri get() = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath(path).build()
+  }
+
   private sealed interface CoverLoadResult {
     data class Ready(
       val base64: String,
@@ -1317,6 +1456,10 @@ class PowerampGateway(
     const val NEGATIVE_COVER_CACHE_MS = 30_000L
     const val MAX_COVER_DIMENSION = 1024
     const val COVER_JPEG_QUALITY = 95
+    const val DEFAULT_LIBRARY_COVER_SIZE = 160
+    const val MIN_LIBRARY_COVER_SIZE = 64
+    const val MAX_LIBRARY_COVER_SIZE = 256
+    const val LIBRARY_COVER_JPEG_QUALITY = 80
   }
 }
 
