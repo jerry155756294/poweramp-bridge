@@ -243,34 +243,35 @@ class PowerampGateway(
     "browsealbums" -> LibraryQueryDefinition(
       "albums", arrayOf(
         "${TableDefs.Albums.ALBUM} AS album",
-        "COALESCE(${TableDefs.AlbumArtists.ALBUM_ARTIST}, (SELECT artist_tag FROM ${TableDefs.Files.TABLE} WHERE ${TableDefs.Files.ALBUM_ID}=${TableDefs.Albums._ID} ORDER BY ${TableDefs.Files._ID} LIMIT 1), '') AS artist",
         "${TableDefs.Albums.NUM_FILES} AS count"
       ), "${TableDefs.Albums.ALBUM_SORT} COLLATE NOCASE"
     ) { cursor -> linkedMapOf(
-      "album" to cursor.stringOrBlank("album"), "artist" to cursor.stringOrBlank("artist"),
+      // The /albums provider endpoint deliberately exposes album columns only. Do not use
+      // ad-hoc joins here: several Poweramp versions reject them with SQLiteException.
+      "album" to cursor.stringOrBlank("album"), "artist" to "",
       "count" to (cursor.longOrNull("count") ?: 0L).toInt()
     ) }
     "browsetracks" -> LibraryQueryDefinition(
       "files", arrayOf(
         "${TableDefs.Files.FULL_PATH} AS src", "${TableDefs.Files.ARTIST_TAG} AS artist",
         "${TableDefs.Files.TITLE_TAG} AS title", "${TableDefs.Files.TRACK_TAG} AS trackno",
-        "${TableDefs.Files.DISC} AS disc", "${TableDefs.Files.ALBUM_TAG} AS album",
-        "COALESCE(${TableDefs.AlbumArtists.ALBUM_ARTIST}, '') AS album_artist",
-        "${TableDefs.Genres.GENRE} AS genre"
+        "${TableDefs.Files.DISC} AS disc", "${TableDefs.Files.ALBUM_TAG} AS album"
       ), "${TableDefs.Files.TITLE_TAG} COLLATE NOCASE, ${TableDefs.Files._ID}"
     ) { cursor -> linkedMapOf(
       "src" to cursor.stringOrBlank("src"), "artist" to cursor.stringOrBlank("artist"),
       "title" to cursor.stringOrBlank("title"), "trackno" to (cursor.longOrNull("trackno") ?: 0L).toInt(),
       "disc" to (cursor.longOrNull("disc") ?: 0L).toInt(), "album" to cursor.stringOrBlank("album"),
-      "album_artist" to cursor.stringOrBlank("album_artist"), "genre" to cursor.stringOrBlank("genre")
+      "album_artist" to "", "genre" to ""
     ) }
     else -> null
   }
 
   private fun findLibraryCoverRealId(artist: String, album: String): Long? = runCatching {
     val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
-    context.contentResolver.query(uri, arrayOf("${TableDefs.Files._ID} AS real_id"),
-      "${TableDefs.Files.ALBUM_TAG}=? AND ${TableDefs.Files.ARTIST_TAG}=?", arrayOf(album, artist),
+    val selection = if (artist.isBlank()) "${TableDefs.Files.ALBUM_TAG}=?" else
+      "${TableDefs.Files.ALBUM_TAG}=? AND ${TableDefs.Files.ARTIST_TAG}=?"
+    val args = if (artist.isBlank()) arrayOf(album) else arrayOf(album, artist)
+    context.contentResolver.query(uri, arrayOf("${TableDefs.Files._ID} AS real_id"), selection, args,
       "${TableDefs.Files._ID} ASC")?.use { cursor -> if (cursor.moveToFirst()) cursor.longOrNull("real_id") else null }
   }.getOrNull()
 
