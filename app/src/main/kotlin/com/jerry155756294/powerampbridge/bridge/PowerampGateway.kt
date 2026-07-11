@@ -43,6 +43,8 @@ class PowerampGateway(
   private val negativeCoverCache = ConcurrentHashMap<Long, NegativeCoverCacheEntry>()
   private val libraryCoverCache = ConcurrentHashMap<String, LibraryCoverCacheEntry>()
   private val missingLibraryCoverCache = ConcurrentHashMap<String, Long>()
+  private val libraryAlbumArtistCache = ConcurrentHashMap<String, String>()
+  private val libraryAlbumArtistIdCache = ConcurrentHashMap<Long, String>()
   private val coverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   @Volatile
   private var activeRadioCategory: ActiveRadioCategory? = null
@@ -169,6 +171,12 @@ class PowerampGateway(
 
   override fun readLibraryPage(libraryContext: String, offset: Int, limit: Int): PowerampLibraryPage {
     if (!refreshAvailability()) return unavailableLibraryPage(offset, limit, "poweramp_unavailable")
+    if (libraryContext == "browsealbums" && offset == 0) {
+      // A new metadata sync starts from offset zero. Do not carry album-artist
+      // names across a Poweramp rescan or tag edit.
+      libraryAlbumArtistCache.clear()
+      libraryAlbumArtistIdCache.clear()
+    }
     val definition = libraryQueryDefinition(libraryContext)
       ?: return unavailableLibraryPage(offset, limit, "unknown_context=$libraryContext")
     return runCatching {
@@ -300,7 +308,10 @@ class PowerampGateway(
       "src" to cursor.stringOrBlank("src"), "artist" to cursor.stringOrBlank("artist"),
       "title" to cursor.stringOrBlank("title"), "trackno" to (cursor.longOrNull("trackno") ?: 0L).toInt(),
       "disc" to (cursor.longOrNull("disc") ?: 0L).toInt(), "album" to cursor.stringOrBlank("album"),
-      "album_artist" to "", "genre" to ""
+      "album_artist" to albumArtistForTrack(
+        cursor.stringOrBlank("album"), cursor.stringOrBlank("artist")
+      ),
+      "genre" to ""
     ) }
     else -> null
   }
@@ -316,16 +327,59 @@ class PowerampGateway(
 
   private fun firstArtistForAlbum(album: String): String {
     if (album.isBlank()) return ""
+    libraryAlbumArtistCache[album]?.let { return it }
     val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
-    return runCatching {
+    val resolved = runCatching {
       context.contentResolver.query(
         uri,
-        arrayOf("${TableDefs.Files.ARTIST_TAG} AS artist"),
+        arrayOf(
+          "${TableDefs.Files.ARTIST_TAG} AS artist",
+          "${TableDefs.Files.ALBUM_ARTIST_ID} AS album_artist_id"
+        ),
         "${TableDefs.Files.ALBUM_TAG}=?",
         arrayOf(album),
         "${TableDefs.Files._ID} ASC"
-      )?.use { cursor -> if (cursor.moveToFirst()) cursor.stringOrBlank("artist") else "" } ?: ""
+      )?.use { cursor ->
+        var fallbackArtist = ""
+        var albumArtist = ""
+        while (cursor.moveToNext()) {
+          if (fallbackArtist.isBlank()) fallbackArtist = cursor.stringOrBlank("artist")
+          val albumArtistId = cursor.longOrNull("album_artist_id") ?: 0L
+          if (albumArtistId > 0L) {
+            albumArtist = albumArtistName(albumArtistId)
+            if (albumArtist.isNotBlank()) break
+          }
+        }
+        albumArtist.ifBlank { fallbackArtist }
+      } ?: ""
     }.getOrDefault("")
+    if (resolved.isNotBlank()) libraryAlbumArtistCache[album] = resolved
+    return resolved
+  }
+
+  private fun albumArtistForTrack(album: String, trackArtist: String): String {
+    if (album.isBlank()) return trackArtist
+    return libraryAlbumArtistCache[album]
+      ?: firstArtistForAlbum(album).ifBlank { trackArtist }
+  }
+
+  private fun albumArtistName(id: Long): String {
+    if (id <= 0L) return ""
+    libraryAlbumArtistIdCache[id]?.let { return it }
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("album_artists").build()
+    val name = runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf(TableDefs.AlbumArtists.ALBUM_ARTIST),
+        "${TableDefs.AlbumArtists._ID}=?",
+        arrayOf(id.toString()),
+        null
+      )?.use { cursor ->
+        if (cursor.moveToFirst()) cursor.stringOrBlank("album_artist") else ""
+      } ?: ""
+    }.getOrDefault("")
+    if (name.isNotBlank()) libraryAlbumArtistIdCache[id] = name
+    return name
   }
 
   private fun readLibraryArtistAlbums(artist: String): List<Map<String, Any?>> {
@@ -345,7 +399,13 @@ class PowerampGateway(
         val album = cursor.stringOrBlank("album")
         if (album.isNotBlank()) counts[album] = (counts[album] ?: 0) + 1
       }
-      counts.map { (album, count) -> mapOf("album" to album, "artist" to artist, "count" to count) }
+      counts.map { (album, count) ->
+        mapOf(
+          "album" to album,
+          "artist" to albumArtistForTrack(album, artist),
+          "count" to count
+        )
+      }
     } ?: emptyList()
   }
 
@@ -392,7 +452,10 @@ class PowerampGateway(
             "src" to cursor.stringOrBlank("src"), "artist" to cursor.stringOrBlank("artist"),
             "title" to cursor.stringOrBlank("title"), "trackno" to (cursor.longOrNull("trackno") ?: 0L).toInt(),
             "disc" to (cursor.longOrNull("disc") ?: 0L).toInt(), "album" to cursor.stringOrBlank("album"),
-            "album_artist" to cursor.stringOrBlank("artist"), "genre" to ""
+            "album_artist" to albumArtistForTrack(
+              cursor.stringOrBlank("album"), cursor.stringOrBlank("artist")
+            ),
+            "genre" to ""
           )
         )
       }
