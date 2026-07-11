@@ -40,6 +40,8 @@ class PowerampGateway(
   private var coverLoadGeneration: Long = 0L
   private val negativeCoverCache = ConcurrentHashMap<Long, NegativeCoverCacheEntry>()
   private val coverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+  @Volatile
+  private var activeRadioCategory: ActiveRadioCategory? = null
 
   private val receiver = object : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -241,6 +243,16 @@ class PowerampGateway(
       return libraryStations
     }
 
+    // Built-in/imported radio can be exposed as virtual `playlist:` items only. The track
+    // broadcast carries a Poweramp category URI that remains a valid OPEN_TO_PLAY target.
+    val categoryStations = readActiveRadioCategoryStations()
+    if (categoryStations.isNotEmpty()) {
+      stateRepository.recordPowerampEvent(
+        "Radio query source=poweramp_active_category total=${categoryStations.size}"
+      )
+      return categoryStations
+    }
+
     // Poweramp can load a radio M3U directly into its current queue without creating a row in
     // the /streams collection. This is the final fallback for playlist-backed radio sources.
     val rawQueueItems = readQueueItems()
@@ -261,6 +273,7 @@ class PowerampGateway(
     stateRepository.recordPowerampEvent(
       "Radio query source=${if (queuedStations.isEmpty()) "poweramp_queue_no_http" else "poweramp_queue"} " +
         "streams=${streamStations.size} playlists=${playlistStations.size} files=${libraryStations.size} " +
+        "category=${activeRadioCategory?.categoryUri?.path ?: "none"} " +
         "queue_total=${rawQueueItems.size} total=${queuedStations.size}"
     )
     return queuedStations
@@ -394,6 +407,79 @@ class PowerampGateway(
         "Radio files query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
       )
     }.getOrDefault(emptyList())
+  }
+
+  private fun readActiveRadioCategoryStations(): List<PowerampRadioStation> {
+    val category = activeRadioCategory ?: return emptyList()
+    val categoryUri = category.categoryUri
+    val entryIdColumn = when {
+      categoryUri.pathSegments.contains("queue") -> TableDefs.Queue._ID
+      categoryUri.pathSegments.contains("playlists") -> TableDefs.PlaylistEntries._ID
+      else -> TableDefs.Files._ID
+    }
+    val queryUri = categoryUri.buildUpon()
+      .clearQuery()
+      .appendQueryParameter("lim", "800")
+      .build()
+
+    val stations = runCatching {
+      context.contentResolver.query(
+        queryUri,
+        arrayOf(
+          "$entryIdColumn AS entry_id",
+          "${TableDefs.Files.NAME_WITHOUT_NUMBER} AS station_name",
+          "${TableDefs.Files.TITLE_TAG} AS title_tag",
+          "${TableDefs.Files.ARTIST_TAG} AS artist_tag",
+          "${TableDefs.Files.ALBUM_TAG} AS album_tag",
+          "${TableDefs.Files.URL} AS station_url",
+          "${TableDefs.Files.FULL_PATH} AS station_path"
+        ),
+        null,
+        null,
+        null
+      )?.use { cursor ->
+        buildList {
+          while (cursor.moveToNext()) {
+            val entryId = cursor.longOrNull("entry_id") ?: continue
+            val rawTarget = cursor.firstNonBlank("station_url", "station_path")
+            val target = rawTarget.takeIf { it.isHttpUrl() }
+              ?: categoryUri.buildUpon().appendEncodedPath(entryId.toString()).build().toString()
+            add(
+              PowerampRadioStation(
+                streamId = entryId,
+                name = cursor.firstNonBlank("station_name", "title_tag")
+                  .ifBlank { rawTarget }
+                  .ifBlank { "廣播 $entryId" },
+                url = target,
+                artist = cursor.stringOrBlank("artist_tag"),
+                album = cursor.stringOrBlank("album_tag")
+              )
+            )
+          }
+        }
+      } ?: emptyList()
+    }.onFailure { error ->
+      Timber.w(error, "Failed querying active Poweramp radio category")
+      stateRepository.recordPowerampEvent(
+        "Radio category query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.getOrDefault(emptyList()).normalizeRadioStations()
+
+    if (stations.isNotEmpty()) return stations
+
+    // Track.ID is the category entry ID paired with CAT_URI in Poweramp's track broadcast.
+    // This preserves at least the current virtual station when its category can't be enumerated.
+    return category.entryId.takeIf { it > 0L }?.let { entryId ->
+      listOf(
+        PowerampRadioStation(
+          streamId = entryId,
+          name = category.title.ifBlank { category.path }.ifBlank { "目前廣播" },
+          url = categoryUri.buildUpon().appendEncodedPath(entryId.toString()).build().toString(),
+          artist = category.artist,
+          album = category.album
+        )
+      )
+    } ?: emptyList()
   }
 
   private fun readPlaylistRadioEntries(
@@ -731,6 +817,7 @@ class PowerampGateway(
     val positionSec = PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.Track.POSITION) ?: -1
     val durationMs = PowerampBroadcastDiagnostics.extractDurationMs(track)
     val realId = PowerampBroadcastDiagnostics.readLong(track, PowerampAPI.Track.REAL_ID) ?: 0L
+    captureActiveRadioCategory(track)
     stateRepository.updatePlayback { playback ->
       playback.copy(
         track = playback.track.copy(
@@ -763,6 +850,30 @@ class PowerampGateway(
     }
     stateRepository.recordPowerampEvent(
       "Track changed ($actionLabel): ${track.getString(PowerampAPI.Track.TITLE).orEmpty()}"
+    )
+  }
+
+  @Suppress("DEPRECATION")
+  private fun captureActiveRadioCategory(track: Bundle) {
+    val path = track.getString(PowerampAPI.Track.PATH).orEmpty()
+    val category = PowerampBroadcastDiagnostics.readInt(track, PowerampAPI.Track.CAT)
+    if (!path.isRadioLikePath() && category != PowerampAPI.Cats.STREAM_FILES) {
+      activeRadioCategory = null
+      return
+    }
+
+    val categoryUri = track.getParcelable(PowerampAPI.Track.CAT_URI) as? Uri ?: return
+    val entryId = PowerampBroadcastDiagnostics.readLong(track, PowerampAPI.Track.ID) ?: 0L
+    activeRadioCategory = ActiveRadioCategory(
+      categoryUri = categoryUri.buildUpon().clearQuery().build(),
+      entryId = entryId,
+      title = track.getString(PowerampAPI.Track.TITLE).orEmpty(),
+      artist = track.getString(PowerampAPI.Track.ARTIST).orEmpty(),
+      album = track.getString(PowerampAPI.Track.ALBUM).orEmpty(),
+      path = path
+    )
+    stateRepository.recordPowerampEvent(
+      "Radio category captured: cat=$category id=$entryId uri=${categoryUri.buildUpon().clearQuery().build()}"
     )
   }
 
@@ -1209,6 +1320,15 @@ class PowerampGateway(
   }
 }
 
+private data class ActiveRadioCategory(
+  val categoryUri: Uri,
+  val entryId: Long,
+  val title: String,
+  val artist: String,
+  val album: String,
+  val path: String
+)
+
 private fun Cursor.stringOrBlank(columnName: String): String =
   stringOrNull(columnName).orEmpty()
 
@@ -1240,14 +1360,21 @@ private fun Cursor.firstNonBlank(vararg columnNames: String): String {
 
 private fun List<PowerampRadioStation>.normalizeRadioStations(): List<PowerampRadioStation> =
   asSequence()
-    // Empty/non-network paths cannot be selected and played from MBRC's Radio screen.
-    .filter { it.url.isHttpUrl() }
+    // Poweramp data URIs are valid OPEN_TO_PLAY targets and preserve virtual radio entries
+    // whose original HTTP URLs are intentionally not exposed by Poweramp.
+    .filter { it.url.isHttpUrl() || it.url.isPowerampDataUri() }
     .distinctBy { it.url.trim().lowercase() }
     .sortedBy { it.name.lowercase() }
     .toList()
 
 private fun String.isHttpUrl(): Boolean =
   startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
+
+private fun String.isRadioLikePath(): Boolean =
+  isHttpUrl() || startsWith("playlist:", ignoreCase = true)
+
+private fun String.isPowerampDataUri(): Boolean =
+  startsWith("content://com.maxmpz.audioplayer.data/", ignoreCase = true)
 
 internal object PowerampBroadcastDiagnostics {
   fun extractDurationMs(track: Bundle): Long {
