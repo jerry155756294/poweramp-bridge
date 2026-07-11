@@ -233,9 +233,18 @@ class PowerampGateway(
       return playlistStations
     }
 
+    val libraryStations = readLibraryRadioStations()
+    if (libraryStations.isNotEmpty()) {
+      stateRepository.recordPowerampEvent(
+        "Radio query source=poweramp_files total=${libraryStations.size}"
+      )
+      return libraryStations
+    }
+
     // Poweramp can load a radio M3U directly into its current queue without creating a row in
     // the /streams collection. This is the final fallback for playlist-backed radio sources.
-    val queuedStations = readQueueItems()
+    val rawQueueItems = readQueueItems()
+    val queuedStations = rawQueueItems
       .asSequence()
       .filter { it.path.isHttpUrl() }
       .mapIndexed { index, item ->
@@ -250,7 +259,9 @@ class PowerampGateway(
       .toList()
       .normalizeRadioStations()
     stateRepository.recordPowerampEvent(
-      "Radio query source=${if (queuedStations.isEmpty()) "poweramp_queue_no_http" else "poweramp_queue"} total=${queuedStations.size}"
+      "Radio query source=${if (queuedStations.isEmpty()) "poweramp_queue_no_http" else "poweramp_queue"} " +
+        "streams=${streamStations.size} playlists=${playlistStations.size} files=${libraryStations.size} " +
+        "queue_total=${rawQueueItems.size} total=${queuedStations.size}"
     )
     return queuedStations
   }
@@ -336,6 +347,53 @@ class PowerampGateway(
     return playlists.flatMap { (playlistId, playlistName) ->
       readPlaylistRadioEntries(playlistId, playlistName)
     }.normalizeRadioStations()
+  }
+
+  private fun readLibraryRadioStations(): List<PowerampRadioStation> {
+    val uri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("files")
+      .build()
+    return runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf(
+          "${TableDefs.Files._ID} AS file_id",
+          "${TableDefs.Files.NAME_WITHOUT_NUMBER} AS station_name",
+          "${TableDefs.Files.TITLE_TAG} AS title_tag",
+          "${TableDefs.Files.ARTIST_TAG} AS artist_tag",
+          "${TableDefs.Files.ALBUM_TAG} AS album_tag",
+          "${TableDefs.Files.URL} AS station_url",
+          "${TableDefs.Files.FULL_PATH} AS station_path"
+        ),
+        "${TableDefs.Files.URL} IS NOT NULL",
+        null,
+        null
+      )?.use { cursor ->
+        buildList {
+          while (cursor.moveToNext()) {
+            val fileId = cursor.longOrNull("file_id") ?: continue
+            val url = cursor.firstNonBlank("station_url", "station_path")
+            if (!url.isHttpUrl()) continue
+            add(
+              PowerampRadioStation(
+                streamId = fileId,
+                name = cursor.firstNonBlank("station_name", "title_tag", "station_url"),
+                url = url,
+                artist = cursor.stringOrBlank("artist_tag"),
+                album = cursor.stringOrBlank("album_tag")
+              )
+            )
+          }
+        }
+      }?.also {
+        stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.AVAILABLE)
+      }?.normalizeRadioStations() ?: emptyList()
+    }.onFailure { error ->
+      Timber.w(error, "Failed querying Poweramp URL files")
+      stateRepository.recordPowerampEvent(
+        "Radio files query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.getOrDefault(emptyList())
   }
 
   private fun readPlaylistRadioEntries(
