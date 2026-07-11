@@ -1,6 +1,7 @@
 package com.jerry155756294.powerampbridge.bridge
 
 import android.content.BroadcastReceiver
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -228,6 +229,25 @@ class PowerampGateway(
     return mapOf("status" to 200, "artist" to artist, "album" to album, "cover" to cached.base64, "hash" to cached.hash)
   }
 
+  override fun readLibraryNavigation(context: String, query: String): List<Map<String, Any?>> {
+    if (!refreshAvailability() || query.isBlank()) return emptyList()
+    return runCatching {
+      when (context) {
+        "libraryalbumtracks" -> readLibraryTracksWhere(
+          "${TableDefs.Files.ALBUM_TAG}=?", arrayOf(query)
+        )
+        "libraryartistalbums" -> readLibraryArtistAlbums(query)
+        "librarygenreartists" -> readLibraryGenreArtists(query)
+        else -> emptyList()
+      }
+    }.onFailure { error ->
+      Timber.w(error, "Poweramp library navigation failed: %s", context)
+      stateRepository.recordPowerampEvent(
+        "Library navigation failed $context: ${error.javaClass.simpleName}"
+      )
+    }.getOrDefault(emptyList())
+  }
+
   private fun unavailableLibraryPage(offset: Int, limit: Int, detail: String): PowerampLibraryPage {
     stateRepository.recordProtocolEvent("library_unavailable:$detail")
     return PowerampLibraryPage(0, offset, limit, emptyList(), available = false)
@@ -244,11 +264,12 @@ class PowerampGateway(
       "albums", arrayOf(
         "${TableDefs.Albums.ALBUM} AS album",
         "${TableDefs.Albums.NUM_FILES} AS count"
-      ), "${TableDefs.Albums.ALBUM_SORT} COLLATE NOCASE"
+      ), "${TableDefs.Albums.ALBUM} COLLATE NOCASE"
     ) { cursor -> linkedMapOf(
       // The /albums provider endpoint deliberately exposes album columns only. Do not use
       // ad-hoc joins here: several Poweramp versions reject them with SQLiteException.
-      "album" to cursor.stringOrBlank("album"), "artist" to "",
+      "album" to cursor.stringOrBlank("album"),
+      "artist" to firstArtistForAlbum(cursor.stringOrBlank("album")),
       "count" to (cursor.longOrNull("count") ?: 0L).toInt()
     ) }
     "browsetracks" -> LibraryQueryDefinition(
@@ -274,6 +295,89 @@ class PowerampGateway(
     context.contentResolver.query(uri, arrayOf("${TableDefs.Files._ID} AS real_id"), selection, args,
       "${TableDefs.Files._ID} ASC")?.use { cursor -> if (cursor.moveToFirst()) cursor.longOrNull("real_id") else null }
   }.getOrNull()
+
+  private fun firstArtistForAlbum(album: String): String {
+    if (album.isBlank()) return ""
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
+    return runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf("${TableDefs.Files.ARTIST_TAG} AS artist"),
+        "${TableDefs.Files.ALBUM_TAG}=?",
+        arrayOf(album),
+        "${TableDefs.Files._ID} ASC"
+      )?.use { cursor -> if (cursor.moveToFirst()) cursor.stringOrBlank("artist") else "" } ?: ""
+    }.getOrDefault("")
+  }
+
+  private fun readLibraryArtistAlbums(artist: String): List<Map<String, Any?>> {
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
+    return context.contentResolver.query(
+      uri,
+      arrayOf(
+        "${TableDefs.Files.ALBUM_TAG} AS album",
+        "${TableDefs.Files.ARTIST_TAG} AS artist"
+      ),
+      "${TableDefs.Files.ARTIST_TAG}=? AND ${TableDefs.Files.ALBUM_TAG} IS NOT NULL AND ${TableDefs.Files.ALBUM_TAG}!=''",
+      arrayOf(artist),
+      "${TableDefs.Files.ALBUM_TAG} COLLATE NOCASE, ${TableDefs.Files._ID}"
+    )?.use { cursor ->
+      val counts = linkedMapOf<String, Int>()
+      while (cursor.moveToNext()) {
+        val album = cursor.stringOrBlank("album")
+        if (album.isNotBlank()) counts[album] = (counts[album] ?: 0) + 1
+      }
+      counts.map { (album, count) -> mapOf("album" to album, "artist" to artist, "count" to count) }
+    } ?: emptyList()
+  }
+
+  private fun readLibraryGenreArtists(genre: String): List<Map<String, Any?>> {
+    // Genres are a category relation in Poweramp; unlike /files, the category endpoint
+    // exposes the relation without requiring an unsupported SQL join.
+    val genreUri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("genres").build()
+    val genreId = context.contentResolver.query(
+      genreUri, arrayOf("${TableDefs.Genres._ID} AS genre_id"), "${TableDefs.Genres.GENRE}=?",
+      arrayOf(genre), null
+    )?.use { cursor -> if (cursor.moveToFirst()) cursor.longOrNull("genre_id") else null } ?: return emptyList()
+    val artistsUri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("genres").appendEncodedPath(genreId.toString()).appendEncodedPath("artists").build()
+    return context.contentResolver.query(
+      artistsUri,
+      arrayOf("${TableDefs.Artists.ARTIST} AS artist", "${TableDefs.Artists.NUM_FILES} AS count"),
+      null, null, "${TableDefs.Artists.ARTIST} COLLATE NOCASE"
+    )?.use { cursor ->
+      buildList {
+        while (cursor.moveToNext()) add(
+          mapOf("artist" to cursor.stringOrBlank("artist"), "count" to (cursor.longOrNull("count") ?: 0L).toInt())
+        )
+      }
+    } ?: emptyList()
+  }
+
+  private fun readLibraryTracksWhere(selection: String, selectionArgs: Array<String>): List<Map<String, Any?>> {
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
+    return context.contentResolver.query(
+      uri,
+      arrayOf(
+        "${TableDefs.Files.FULL_PATH} AS src", "${TableDefs.Files.ARTIST_TAG} AS artist",
+        "${TableDefs.Files.TITLE_TAG} AS title", "${TableDefs.Files.TRACK_TAG} AS trackno",
+        "${TableDefs.Files.DISC} AS disc", "${TableDefs.Files.ALBUM_TAG} AS album"
+      ),
+      selection, selectionArgs,
+      "${TableDefs.Files.DISC} ASC, ${TableDefs.Files.TRACK_TAG} ASC, ${TableDefs.Files._ID} ASC"
+    )?.use { cursor ->
+      buildList {
+        while (cursor.moveToNext()) add(
+          linkedMapOf<String, Any?>(
+            "src" to cursor.stringOrBlank("src"), "artist" to cursor.stringOrBlank("artist"),
+            "title" to cursor.stringOrBlank("title"), "trackno" to (cursor.longOrNull("trackno") ?: 0L).toInt(),
+            "disc" to (cursor.longOrNull("disc") ?: 0L).toInt(), "album" to cursor.stringOrBlank("album"),
+            "album_artist" to cursor.stringOrBlank("artist"), "genre" to ""
+          )
+        )
+      }
+    } ?: emptyList()
+  }
 
   private fun loadLibraryCover(realId: Long, size: Int): LibraryCoverCacheEntry? {
     val uri = PowerampAPI.AA_ROOT_URI.buildUpon().appendEncodedPath("files").appendEncodedPath(realId.toString()).build()
@@ -716,6 +820,9 @@ class PowerampGateway(
 
     return when (normalizedType) {
       "now", "default" -> {
+        if (paths.size > 1) {
+          return enqueueLibraryPaths(paths, playPath, normalizedType)
+        }
         val target = playPath?.takeIf { requested ->
           paths.any { it.equals(requested, ignoreCase = true) }
         } ?: paths.first()
@@ -726,6 +833,8 @@ class PowerampGateway(
           detail = "queue command type=$normalizedType play=$target count=${paths.size}"
         )
       }
+
+      "add-all", "next", "last" -> enqueueLibraryPaths(paths, playPath, normalizedType)
 
       else -> QueueCommandResult(
         code = 501,
@@ -747,6 +856,71 @@ class PowerampGateway(
     return sendCommand(PowerampAPI.Commands.SEEK) {
       it.putExtra(PowerampAPI.Track.POSITION, positionSeconds)
     }
+  }
+
+  private fun enqueueLibraryPaths(
+    paths: List<String>,
+    playPath: String?,
+    type: String
+  ): QueueCommandResult {
+    val fileIds = paths.mapNotNull { path -> findFileIdByPath(path)?.let { path to it } }
+    if (fileIds.isEmpty()) {
+      return QueueCommandResult(404, accepted = false, detail = "queue paths not found count=${paths.size}")
+    }
+    val queueUri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("queue").build()
+    val maxSort = context.contentResolver.query(
+      queueUri, arrayOf("MAX(${TableDefs.Queue.SORT})"), null, null, null
+    )?.use { cursor -> if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getInt(0) else 0 } ?: 0
+    var sort = maxSort + 1
+    val inserted = buildList {
+      fileIds.forEach { (path, fileId) ->
+        val values = ContentValues().apply {
+          put(TableDefs.Queue.FOLDER_FILE_ID.substringAfterLast('.'), fileId)
+          put(TableDefs.Queue.SORT.substringAfterLast('.'), sort++)
+        }
+        context.contentResolver.insert(queueUri, values)?.let { entryUri ->
+          add(path to entryUri)
+        }
+      }
+    }
+    if (inserted.isEmpty()) {
+      return QueueCommandResult(500, accepted = false, detail = "queue insert failed count=${fileIds.size}")
+    }
+    notifyPowerampQueueChanged()
+    val target = playPath?.let { requested ->
+      inserted.firstOrNull { it.first.equals(requested, ignoreCase = true) }?.second
+    } ?: inserted.first().second
+    val shouldPlay = type == "add-all" || type == "now" || type == "default"
+    val accepted = !shouldPlay || openToPlay(target)
+    stateRepository.recordPowerampEvent(
+      "Queue insert: type=$type requested=${paths.size} inserted=${inserted.size} play=$shouldPlay accepted=$accepted"
+    )
+    return QueueCommandResult(
+      if (accepted) 200 else 500,
+      accepted,
+      "queue command type=$type inserted=${inserted.size}"
+    )
+  }
+
+  private fun findFileIdByPath(path: String): Long? = runCatching {
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
+    context.contentResolver.query(
+      uri,
+      arrayOf("${TableDefs.Files._ID} AS file_id"),
+      "${TableDefs.Files.FULL_PATH}=? OR ${TableDefs.Files.FILE_PATH}=? OR ${TableDefs.Files.URL}=?",
+      arrayOf(path, path, path),
+      "${TableDefs.Files._ID} ASC"
+    )?.use { cursor -> if (cursor.moveToFirst()) cursor.longOrNull("file_id") else null }
+  }.getOrNull()
+
+  private fun notifyPowerampQueueChanged() {
+    val packageName = PowerampAPIHelper.getPowerampPackageName(context) ?: return
+    context.sendBroadcast(
+      Intent(PowerampAPI.ACTION_RELOAD_DATA)
+        .setPackage(packageName)
+        .putExtra(PowerampAPI.EXTRA_PACKAGE, context.packageName)
+        .putExtra(PowerampAPI.EXTRA_TABLE, TableDefs.Queue.TABLE)
+    )
   }
 
   override fun setLfmRating(action: String): Boolean {

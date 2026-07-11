@@ -138,6 +138,14 @@ class MbrcProtocolAdapter(
         )))
       }
 
+      ProtocolConstants.LibraryArtistAlbums,
+      ProtocolConstants.LibraryAlbumTracks,
+      ProtocolConstants.LibraryGenreArtists ->
+        listOf(codec.encode(message.context, powerampGateway.readLibraryNavigation(
+          message.context,
+          rawString(message.data).orEmpty()
+        )))
+
       ProtocolConstants.LibraryCover ->
         listOf(codec.encode(ProtocolConstants.LibraryCover, powerampGateway.readLibraryCover(message.data as? Map<*, *>)))
 
@@ -528,7 +536,8 @@ class MbrcProtocolAdapter(
     null -> null
     is String -> data
     is Map<*, *> -> {
-      val value = data["value"] ?: data["url"] ?: data["path"] ?: data["src"]
+      val value = data["value"] ?: data["url"] ?: data["path"] ?: data["src"] ?: data["album"]
+        ?: data["artist"] ?: data["genre"] ?: data["name"] ?: data["query"]
       value as? String
     }
     else -> data.toString()

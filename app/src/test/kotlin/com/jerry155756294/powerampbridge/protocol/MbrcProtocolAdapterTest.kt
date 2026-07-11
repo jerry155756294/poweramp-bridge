@@ -130,6 +130,24 @@ class MbrcProtocolAdapterTest {
   }
 
   @Test
+  fun `album drilldown returns navigation tracks`() {
+    controller.libraryNavigation = mapOf(
+      ProtocolConstants.LibraryAlbumTracks to listOf(
+        mapOf("src" to "/music/one.mp3", "title" to "One", "album" to "Album")
+      )
+    )
+
+    val data = JSONObject(
+      adapter.handleCommand(
+        IncomingMessage(ProtocolConstants.LibraryAlbumTracks, "Album")
+      ).single()
+    ).getJSONArray("data")
+
+    assertEquals(1, data.length())
+    assertEquals("/music/one.mp3", data.getJSONObject(0).getString("src"))
+  }
+
+  @Test
   fun `library cover is delegated with its hash request`() {
     controller.libraryCoverPayload = mapOf("status" to 304, "cover" to null, "hash" to "same")
 
@@ -325,6 +343,7 @@ class MbrcProtocolAdapterTest {
     var queueItems: List<PowerampQueueItem> = emptyList()
     var radioStations: List<PowerampRadioStation> = emptyList()
     var libraryPages: Map<String, PowerampLibraryPage> = emptyMap()
+    var libraryNavigation: Map<String, List<Map<String, Any?>>> = emptyMap()
     var libraryCoverPayload: Map<String, Any?> = mapOf("status" to 404, "cover" to null)
     var queueCommandResult: QueueCommandResult = QueueCommandResult(200, true, "ok")
     var lastQueueCommandType: String? = null
@@ -344,6 +363,8 @@ class MbrcProtocolAdapterTest {
     override fun readRadioStations(): List<PowerampRadioStation> = radioStations
     override fun readLibraryPage(context: String, offset: Int, limit: Int): PowerampLibraryPage =
       libraryPages[context] ?: PowerampLibraryPage(0, offset, limit, emptyList())
+    override fun readLibraryNavigation(context: String, query: String): List<Map<String, Any?>> =
+      libraryNavigation[context].orEmpty()
     override fun readLibraryCover(request: Map<*, *>?): Map<String, Any?> = libraryCoverPayload
 
     override fun playPause(): Boolean = true
