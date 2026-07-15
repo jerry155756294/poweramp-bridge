@@ -8,6 +8,8 @@ import android.content.IntentFilter
 import android.database.Cursor
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -26,6 +28,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import kotlin.math.ceil
@@ -37,13 +40,16 @@ class PowerampGateway(
   private val audioManager =
     context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
+  @Volatile
   private var registered = false
+  private var audioDeviceCallbackRegistered = false
   private var coverLoadJob: Job? = null
+  private var audioDeviceRefreshJob: Job? = null
   private var coverLoadGeneration: Long = 0L
   private val negativeCoverCache = ConcurrentHashMap<Long, NegativeCoverCacheEntry>()
   private val libraryCoverCache = ConcurrentHashMap<String, LibraryCoverCacheEntry>()
   private val missingLibraryCoverCache = ConcurrentHashMap<String, Long>()
-  private val libraryAlbumArtistCache = ConcurrentHashMap<String, String>()
+  private val libraryAlbumArtistCache = ConcurrentHashMap<Long, String>()
   private val libraryAlbumArtistIdCache = ConcurrentHashMap<Long, String>()
   private val coverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   @Volatile
@@ -78,6 +84,16 @@ class PowerampGateway(
     }
   }
 
+  private val audioDeviceCallback = object : AudioDeviceCallback() {
+    override fun onAudioDevicesAdded(addedDevices: Array<AudioDeviceInfo>) {
+      handleAudioOutputDevicesChanged("added", addedDevices)
+    }
+
+    override fun onAudioDevicesRemoved(removedDevices: Array<AudioDeviceInfo>) {
+      handleAudioOutputDevicesChanged("removed", removedDevices)
+    }
+  }
+
   fun start() {
     if (registered) return
     refreshAvailability()
@@ -96,6 +112,15 @@ class PowerampGateway(
       filter,
       ContextCompat.RECEIVER_EXPORTED
     )
+    runCatching {
+      audioManager.registerAudioDeviceCallback(audioDeviceCallback, null)
+      audioDeviceCallbackRegistered = true
+    }.onFailure { error ->
+      Timber.w(error, "Unable to observe audio output device changes")
+      stateRepository.recordPowerampEvent(
+        "Audio device observer unavailable: ${error.javaClass.simpleName}"
+      )
+    }
     registered = true
     updateVolumeSnapshot()
   }
@@ -103,8 +128,13 @@ class PowerampGateway(
   fun stop() {
     if (!registered) return
     runCatching { context.unregisterReceiver(receiver) }
+    if (audioDeviceCallbackRegistered) {
+      runCatching { audioManager.unregisterAudioDeviceCallback(audioDeviceCallback) }
+      audioDeviceCallbackRegistered = false
+    }
     registered = false
     coverLoadJob?.cancel()
+    audioDeviceRefreshJob?.cancel()
   }
 
   fun refreshAvailability(): Boolean {
@@ -242,7 +272,7 @@ class PowerampGateway(
     return runCatching {
       when (context) {
         "libraryalbumtracks" -> readLibraryTracksWhere(
-          "${TableDefs.Files.ALBUM_TAG}=?", arrayOf(query)
+          "${TableDefs.Albums.ALBUM}=?", arrayOf(query)
         )
         "libraryartistalbums" -> readLibraryArtistAlbums(query)
         "librarygenreartists" -> readLibraryGenreArtists(query)
@@ -294,53 +324,69 @@ class PowerampGateway(
         TableDefs.Albums.ALBUM
       ),
       TableDefs.Albums.ALBUM
-    ) { cursor -> linkedMapOf(
-      // The /albums provider endpoint deliberately exposes album columns only. Do not use
-      // ad-hoc joins here: several Poweramp versions reject them with SQLiteException.
-      "album" to cursor.stringOrBlank("album"),
-      "artist" to firstArtistForAlbum(cursor.stringOrBlank("album")),
-      "count" to countTracksForAlbum(cursor.stringOrBlank("album"))
-    ) }
+    ) { cursor ->
+      val albumId = cursor.longOrNull("_id")
+        ?: cursor.longOrNull(TableDefs.Albums._ID)
+        ?: 0L
+      linkedMapOf(
+        // The /albums provider endpoint deliberately exposes album columns only. Do not use
+        // ad-hoc joins here: several Poweramp versions reject them with SQLiteException.
+        "album" to cursor.stringOrBlank("album"),
+        "artist" to firstArtistForAlbum(albumId),
+        "count" to countTracksForAlbum(albumId)
+      )
+    }
     "browsetracks" -> LibraryQueryDefinition(
-      "files", arrayOf(
-        "${TableDefs.Files.FULL_PATH} AS src", "${TableDefs.Files.ARTIST_TAG} AS artist",
-        "${TableDefs.Files.TITLE_TAG} AS title", "${TableDefs.Files.TRACK_TAG} AS trackno",
-        "${TableDefs.Files.DISC} AS disc", "${TableDefs.Files.ALBUM_TAG} AS album"
-      ), "${TableDefs.Files.TITLE_TAG} COLLATE NOCASE, ${TableDefs.Files._ID}"
-    ) { cursor -> linkedMapOf(
-      "src" to cursor.stringOrBlank("src"), "artist" to cursor.stringOrBlank("artist"),
-      "title" to cursor.stringOrBlank("title"), "trackno" to (cursor.longOrNull("trackno") ?: 0L).toInt(),
-      "disc" to (cursor.longOrNull("disc") ?: 0L).toInt(), "album" to cursor.stringOrBlank("album"),
-      "album_artist" to albumArtistForTrack(
-        cursor.stringOrBlank("album"), cursor.stringOrBlank("artist")
-      ),
-      "genre" to ""
-    ) }
+      "files",
+      libraryTrackProjection(),
+      "${TableDefs.Files.TITLE_TAG} COLLATE NOCASE, ${TableDefs.Files._ID}",
+      ::libraryTrackPayload
+    )
     else -> null
   }
 
   private fun findLibraryCoverRealId(artist: String, album: String): Long? = runCatching {
     val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
-    val selection = if (artist.isBlank()) "${TableDefs.Files.ALBUM_TAG}=?" else
-      "${TableDefs.Files.ALBUM_TAG}=? AND ${TableDefs.Files.ARTIST_TAG}=?"
-    val args = if (artist.isBlank()) arrayOf(album) else arrayOf(album, artist)
-    context.contentResolver.query(uri, arrayOf("${TableDefs.Files._ID} AS real_id"), selection, args,
-      "${TableDefs.Files._ID} ASC")?.use { cursor -> if (cursor.moveToFirst()) cursor.longOrNull("real_id") else null }
+    context.contentResolver.query(
+      uri,
+      arrayOf(
+        "${TableDefs.Files._ID} AS real_id",
+        "${TableDefs.Files.ALBUM_ARTIST_ID} AS album_artist_id",
+        "${TableDefs.Artists.ARTIST} AS track_artist"
+      ),
+      "${TableDefs.Albums.ALBUM}=?",
+      arrayOf(album),
+      "${TableDefs.Files._ID} ASC"
+    )?.use { cursor ->
+      var fallbackRealId: Long? = null
+      var matchedRealId: Long? = null
+      while (cursor.moveToNext()) {
+        val realId = cursor.longOrNull("real_id") ?: continue
+        if (fallbackRealId == null) fallbackRealId = realId
+        val albumArtist = albumArtistName(cursor.longOrNull("album_artist_id") ?: 0L)
+          .ifBlank { cursor.stringOrBlank("track_artist") }
+        if (artist.isBlank() || artist == albumArtist) {
+          matchedRealId = realId
+          break
+        }
+      }
+      if (artist.isBlank()) fallbackRealId else matchedRealId
+    }
   }.getOrNull()
 
-  private fun firstArtistForAlbum(album: String): String {
-    if (album.isBlank()) return ""
-    libraryAlbumArtistCache[album]?.let { return it }
+  private fun firstArtistForAlbum(albumId: Long): String {
+    if (albumId <= 0L) return ""
+    libraryAlbumArtistCache[albumId]?.let { return it }
     val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
     val resolved = runCatching {
       context.contentResolver.query(
         uri,
         arrayOf(
-          "${TableDefs.Files.ARTIST_TAG} AS artist",
+          "${TableDefs.Artists.ARTIST} AS artist",
           "${TableDefs.Files.ALBUM_ARTIST_ID} AS album_artist_id"
         ),
-        "${TableDefs.Files.ALBUM_TAG}=?",
-        arrayOf(album),
+        "${TableDefs.Files.ALBUM_ID}=?",
+        arrayOf(albumId.toString()),
         "${TableDefs.Files._ID} ASC"
       )?.use { cursor ->
         var fallbackArtist = ""
@@ -356,25 +402,25 @@ class PowerampGateway(
         albumArtist.ifBlank { fallbackArtist }
       } ?: ""
     }.getOrDefault("")
-    if (resolved.isNotBlank()) libraryAlbumArtistCache[album] = resolved
+    if (resolved.isNotBlank()) libraryAlbumArtistCache[albumId] = resolved
     return resolved
   }
 
-  private fun albumArtistForTrack(album: String, trackArtist: String): String {
-    if (album.isBlank()) return trackArtist
-    return libraryAlbumArtistCache[album]
-      ?: firstArtistForAlbum(album).ifBlank { trackArtist }
+  private fun albumArtistForTrack(albumId: Long, trackArtist: String): String {
+    if (albumId <= 0L) return trackArtist
+    return libraryAlbumArtistCache[albumId]
+      ?: firstArtistForAlbum(albumId).ifBlank { trackArtist }
   }
 
-  private fun countTracksForAlbum(album: String): Int {
-    if (album.isBlank()) return 0
+  private fun countTracksForAlbum(albumId: Long): Int {
+    if (albumId <= 0L) return 0
     val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
     return runCatching {
       context.contentResolver.query(
         uri,
         arrayOf(TableDefs.Files._ID),
-        "${TableDefs.Files.ALBUM_TAG}=?",
-        arrayOf(album),
+        "${TableDefs.Files.ALBUM_ID}=?",
+        arrayOf(albumId.toString()),
         TableDefs.Files._ID
       )?.use { cursor -> cursor.count } ?: 0
     }.getOrDefault(0)
@@ -404,22 +450,28 @@ class PowerampGateway(
     return context.contentResolver.query(
       uri,
       arrayOf(
-        "${TableDefs.Files.ALBUM_TAG} AS album",
-        "${TableDefs.Files.ARTIST_TAG} AS artist"
+        "${TableDefs.Files.ALBUM_ID} AS album_id",
+        "${TableDefs.Albums.ALBUM} AS album"
       ),
-      "${TableDefs.Files.ARTIST_TAG}=? AND ${TableDefs.Files.ALBUM_TAG} IS NOT NULL AND ${TableDefs.Files.ALBUM_TAG}!=''",
+      "${TableDefs.Artists.ARTIST}=? AND ${TableDefs.Files.ALBUM_ID}>0",
       arrayOf(artist),
-      "${TableDefs.Files.ALBUM_TAG} COLLATE NOCASE, ${TableDefs.Files._ID}"
+      "${TableDefs.Albums.ALBUM} COLLATE NOCASE, ${TableDefs.Files._ID}"
     )?.use { cursor ->
-      val counts = linkedMapOf<String, Int>()
+      val albumNames = linkedMapOf<Long, String>()
+      val counts = linkedMapOf<Long, Int>()
       while (cursor.moveToNext()) {
+        val albumId = cursor.longOrNull("album_id") ?: continue
         val album = cursor.stringOrBlank("album")
-        if (album.isNotBlank()) counts[album] = (counts[album] ?: 0) + 1
+        if (album.isNotBlank()) {
+          albumNames.putIfAbsent(albumId, album)
+          counts[albumId] = (counts[albumId] ?: 0) + 1
+        }
       }
-      counts.map { (album, count) ->
+      counts.mapNotNull { (albumId, count) ->
+        val album = albumNames[albumId] ?: return@mapNotNull null
         mapOf(
           "album" to album,
-          "artist" to albumArtistForTrack(album, artist),
+          "artist" to albumArtistForTrack(albumId, artist),
           "count" to count
         )
       }
@@ -439,8 +491,8 @@ class PowerampGateway(
       .appendEncodedPath("genres").appendEncodedPath(genreId.toString()).appendEncodedPath("files").build()
     return context.contentResolver.query(
       filesUri,
-      arrayOf("${TableDefs.Files.ARTIST_TAG} AS artist"),
-      null, null, "${TableDefs.Files.ARTIST_TAG} COLLATE NOCASE"
+      arrayOf("${TableDefs.Artists.ARTIST} AS artist"),
+      null, null, "${TableDefs.Artists.ARTIST} COLLATE NOCASE"
     )?.use { cursor ->
       val counts = linkedMapOf<String, Int>()
       while (cursor.moveToNext()) {
@@ -455,28 +507,41 @@ class PowerampGateway(
     val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
     return context.contentResolver.query(
       uri,
-      arrayOf(
-        "${TableDefs.Files.FULL_PATH} AS src", "${TableDefs.Files.ARTIST_TAG} AS artist",
-        "${TableDefs.Files.TITLE_TAG} AS title", "${TableDefs.Files.TRACK_TAG} AS trackno",
-        "${TableDefs.Files.DISC} AS disc", "${TableDefs.Files.ALBUM_TAG} AS album"
-      ),
+      libraryTrackProjection(),
       selection, selectionArgs,
       "${TableDefs.Files.DISC} ASC, ${TableDefs.Files.TRACK_TAG} ASC, ${TableDefs.Files._ID} ASC"
     )?.use { cursor ->
       buildList {
-        while (cursor.moveToNext()) add(
-          linkedMapOf<String, Any?>(
-            "src" to cursor.stringOrBlank("src"), "artist" to cursor.stringOrBlank("artist"),
-            "title" to cursor.stringOrBlank("title"), "trackno" to (cursor.longOrNull("trackno") ?: 0L).toInt(),
-            "disc" to (cursor.longOrNull("disc") ?: 0L).toInt(), "album" to cursor.stringOrBlank("album"),
-            "album_artist" to albumArtistForTrack(
-              cursor.stringOrBlank("album"), cursor.stringOrBlank("artist")
-            ),
-            "genre" to ""
-          )
-        )
+        while (cursor.moveToNext()) add(libraryTrackPayload(cursor))
       }
     } ?: emptyList()
+  }
+
+  private fun libraryTrackProjection(): Array<String> = arrayOf(
+    "${TableDefs.Files.FULL_PATH} AS src",
+    "${TableDefs.Files.ALBUM_ID} AS album_id",
+    "${TableDefs.Artists.ARTIST} AS artist",
+    "${TableDefs.Files.TITLE_TAG} AS title",
+    "${TableDefs.Files.TRACK_TAG} AS trackno",
+    "${TableDefs.Files.DISC} AS disc",
+    "${TableDefs.Albums.ALBUM} AS album",
+    "${TableDefs.Files.YEAR} AS year"
+  )
+
+  private fun libraryTrackPayload(cursor: Cursor): Map<String, Any?> {
+    val albumId = cursor.longOrNull("album_id") ?: 0L
+    val artist = cursor.stringOrBlank("artist")
+    return linkedMapOf(
+      "src" to cursor.stringOrBlank("src"),
+      "artist" to artist,
+      "title" to cursor.stringOrBlank("title"),
+      "trackno" to (cursor.longOrNull("trackno") ?: 0L).toInt(),
+      "disc" to (cursor.longOrNull("disc") ?: 0L).toInt(),
+      "album" to cursor.stringOrBlank("album"),
+      "album_artist" to albumArtistForTrack(albumId, artist),
+      "genre" to "",
+      "year" to cursor.stringOrBlank("year")
+    )
   }
 
   private fun loadLibraryCover(realId: Long, size: Int): LibraryCoverCacheEntry? {
@@ -1139,6 +1204,24 @@ class PowerampGateway(
     )
   }
 
+  private fun handleAudioOutputDevicesChanged(change: String, devices: Array<AudioDeviceInfo>) {
+    val outputDevices = devices.filter { it.isSink }
+    if (outputDevices.isEmpty()) return
+
+    // USB DAC and wired headset routing can complete after the callback. Refresh now for a
+    // responsive UI and once more after the platform has applied the output-specific range.
+    updateVolumeSnapshot()
+    audioDeviceRefreshJob?.cancel()
+    audioDeviceRefreshJob = coverScope.launch {
+      delay(AUDIO_DEVICE_VOLUME_SETTLE_DELAY_MS)
+      if (!registered) return@launch
+      updateVolumeSnapshot()
+      stateRepository.recordPowerampEvent(
+        "Audio output device $change: ${outputDevices.size}; music volume=${stateRepository.state.value.playback.volume}%"
+      )
+    }
+  }
+
   /**
    * Poweramp does not expose one public "read the rendered lyrics" command. Its provider can
    * expose lyrics columns on current files in newer builds, while sidecar LRC and embedded lyrics
@@ -1732,6 +1815,7 @@ class PowerampGateway(
     // These framework broadcasts/extras are @hide, but are stable Android platform contracts.
     const val ACTION_VOLUME_CHANGED = "android.media.VOLUME_CHANGED_ACTION"
     const val EXTRA_VOLUME_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE"
+    const val AUDIO_DEVICE_VOLUME_SETTLE_DELAY_MS = 350L
     // android.media.MediaMetadataRetriever.METADATA_KEY_LYRIC
     const val METADATA_KEY_LYRIC = 1000
     const val NEGATIVE_COVER_CACHE_MS = 30_000L

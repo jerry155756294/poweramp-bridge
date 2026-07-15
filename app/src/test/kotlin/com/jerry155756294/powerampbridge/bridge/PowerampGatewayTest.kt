@@ -1,9 +1,14 @@
 package com.jerry155756294.powerampbridge.bridge
 
 import android.content.Intent
+import android.database.Cursor
+import android.database.MatrixCursor
 import android.os.Bundle
 import com.maxmpz.poweramp.player.PowerampAPI
+import com.maxmpz.poweramp.player.TableDefs
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -13,6 +18,44 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class PowerampGatewayTest {
+  @Test
+  fun `library track projection uses local music metadata columns instead of stream tags`() {
+    val gateway = PowerampGateway(RuntimeEnvironment.getApplication(), BridgeStateRepository())
+    val projectionMethod = PowerampGateway::class.java.getDeclaredMethod("libraryTrackProjection")
+      .apply { isAccessible = true }
+
+    val projection = projectionMethod.invoke(gateway) as Array<*>
+
+    assertTrue(projection.contains("${TableDefs.Artists.ARTIST} AS artist"))
+    assertTrue(projection.contains("${TableDefs.Albums.ALBUM} AS album"))
+    assertTrue(projection.contains("${TableDefs.Files.YEAR} AS year"))
+    assertFalse(projection.contains("${TableDefs.Files.ARTIST_TAG} AS artist"))
+    assertFalse(projection.contains("${TableDefs.Files.ALBUM_TAG} AS album"))
+  }
+
+  @Test
+  @Suppress("UNCHECKED_CAST")
+  fun `library track payload keeps local metadata fields`() {
+    val gateway = PowerampGateway(RuntimeEnvironment.getApplication(), BridgeStateRepository())
+    val cursor = MatrixCursor(
+      arrayOf("src", "album_id", "artist", "title", "trackno", "disc", "album", "year")
+    ).apply {
+      addRow(arrayOf<Any?>("/music/one.flac", 0L, "Artist", "Song", 2L, 1L, "Album", "2024"))
+      assertTrue(moveToFirst())
+    }
+    val payloadMethod = PowerampGateway::class.java.getDeclaredMethod(
+      "libraryTrackPayload",
+      Cursor::class.java
+    ).apply { isAccessible = true }
+
+    val payload = payloadMethod.invoke(gateway, cursor) as Map<String, Any?>
+
+    assertEquals("Artist", payload["artist"])
+    assertEquals("Artist", payload["album_artist"])
+    assertEquals("Album", payload["album"])
+    assertEquals("2024", payload["year"])
+  }
+
   @Test
   fun `duplicate track broadcast keeps cached cover`() {
     val repository = BridgeStateRepository().apply {
