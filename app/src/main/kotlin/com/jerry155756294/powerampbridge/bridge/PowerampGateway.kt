@@ -57,6 +57,8 @@ class PowerampGateway(
   private var activeRadioCategory: ActiveRadioCategory? = null
   @Volatile
   private var activePlaybackCategory: ActivePlaybackCategory? = null
+  @Volatile
+  private var pendingSeekPositionMs: Long? = null
 
   private val receiver = object : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -242,6 +244,63 @@ class PowerampGateway(
     }.getOrElse { unavailableLibraryPage(offset, limit, it.javaClass.simpleName) }
   }
 
+  override fun readPlaylistPage(offset: Int, limit: Int): PowerampPlaylistPage {
+    if (!refreshAvailability()) return unavailablePlaylistPage(offset, limit, "poweramp_unavailable")
+
+    val uri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("playlists")
+      .build()
+    return runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf(
+          "${TableDefs.Playlists._ID} AS playlist_id",
+          "${TableDefs.Playlists.PLAYLIST} AS playlist_name"
+        ),
+        null,
+        null,
+        "${TableDefs.Playlists.PLAYLIST} COLLATE NOCASE"
+      )?.use { cursor ->
+        val total = cursor.count
+        val data = buildList {
+          if (offset < total && cursor.moveToPosition(offset)) {
+            do {
+              val playlistId = cursor.longOrNull("playlist_id") ?: continue
+              val playlistName = cursor.stringOrBlank("playlist_name")
+                .ifBlank { "Playlist $playlistId" }
+              val playlistUri = PowerampAPI.ROOT_URI.buildUpon()
+                .appendEncodedPath("playlists")
+                .appendEncodedPath(playlistId.toString())
+                .build()
+              add(
+                linkedMapOf<String, Any?>(
+                  "name" to playlistName,
+                  "url" to playlistUri.toString()
+                )
+              )
+            } while (size < limit && cursor.moveToNext())
+          }
+        }
+        stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.AVAILABLE)
+        stateRepository.recordProtocolEvent(
+          "playlist_reply total=$total offset=$offset count=${data.size}"
+        )
+        PowerampPlaylistPage(total, offset, limit, data)
+      } ?: unavailablePlaylistPage(offset, limit, "null_cursor")
+    }.onFailure { error ->
+      Timber.w(error, "Poweramp playlist query failed")
+      stateRepository.setPowerampDataAccess(
+        PowerampDataAccessStatus.FAILED,
+        error.javaClass.simpleName
+      )
+      stateRepository.recordPowerampEvent(
+        "Playlist query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.getOrElse {
+      unavailablePlaylistPage(offset, limit, it.javaClass.simpleName)
+    }
+  }
+
   override fun readLibraryCover(request: Map<*, *>?): Map<String, Any?> {
     val artist = request?.get("artist") as? String ?: ""
     val album = request?.get("album") as? String ?: ""
@@ -295,6 +354,11 @@ class PowerampGateway(
   private fun unavailableLibraryPage(offset: Int, limit: Int, detail: String): PowerampLibraryPage {
     stateRepository.recordProtocolEvent("library_unavailable:$detail")
     return PowerampLibraryPage(0, offset, limit, emptyList(), available = false)
+  }
+
+  private fun unavailablePlaylistPage(offset: Int, limit: Int, detail: String): PowerampPlaylistPage {
+    stateRepository.recordProtocolEvent("playlist_unavailable:$detail")
+    return PowerampPlaylistPage(0, offset, limit, emptyList(), available = false)
   }
 
   private fun libraryQueryDefinition(context: String): LibraryQueryDefinition? = when (context) {
@@ -1185,9 +1249,13 @@ class PowerampGateway(
     val positionSeconds = ceil(boundedMs / 1000.0).toLong()
       .coerceIn(0L, Int.MAX_VALUE.toLong())
       .toInt()
-    return sendCommand(PowerampAPI.Commands.SEEK) {
+    val accepted = sendCommand(PowerampAPI.Commands.SEEK) {
       it.putExtra(PowerampAPI.Track.POSITION, positionSeconds)
     }
+    if (accepted) {
+      pendingSeekPositionMs = boundedMs
+    }
+    return accepted
   }
 
   private fun playAllTracks(target: PowerampLibraryTrackRef, type: String): QueueCommandResult {
@@ -1561,6 +1629,9 @@ class PowerampGateway(
 
   private fun handleTrack(intent: Intent, actionLabel: String) {
     val track = intent.getBundleExtra(PowerampAPI.EXTRA_TRACK) ?: return
+    // Track broadcasts carry the authoritative initial position for a new track (and can also
+    // be emitted after a seek), so the next standalone position sync need not stay forced.
+    pendingSeekPositionMs = null
     val positionSec = PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.Track.POSITION) ?: -1
     val durationMs = PowerampBroadcastDiagnostics.extractDurationMs(track)
     val realId = PowerampBroadcastDiagnostics.readLong(track, PowerampAPI.Track.REAL_ID) ?: 0L
@@ -1665,18 +1736,37 @@ class PowerampGateway(
       else -> if (paused) "paused" else stateRepository.state.value.playback.state
     }
     val positionSec = PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.Track.POSITION) ?: -1
+    val forcePosition = pendingSeekPositionMs != null
+    var positionApplied = false
     stateRepository.updatePlayback { playback ->
       val durationMs = playback.track.durationMs
+      val incomingPositionMs = if (positionSec >= 0) {
+        normalizePositionMs(positionSec.toLong() * 1000L, durationMs)
+      } else {
+        null
+      }
+      val shouldApplyPosition = incomingPositionMs?.let {
+        PositionCorrectionPolicy.shouldApply(
+          currentPositionMs = playback.track.positionMs,
+          incomingPositionMs = it,
+          playbackState = state,
+          force = forcePosition
+        )
+      } ?: false
+      if (shouldApplyPosition) positionApplied = true
       playback.copy(
         state = state,
         track = playback.track.copy(
-          positionMs = if (positionSec >= 0) {
-            normalizePositionMs(positionSec.toLong() * 1000L, durationMs)
+          positionMs = if (shouldApplyPosition) {
+            incomingPositionMs ?: playback.track.positionMs
           } else {
             playback.track.positionMs
           }
         )
       )
+    }
+    if (positionApplied && forcePosition) {
+      pendingSeekPositionMs = null
     }
     updateVolumeSnapshot()
     stateRepository.recordPowerampEvent(
@@ -1704,15 +1794,30 @@ class PowerampGateway(
   private fun handlePosition(intent: Intent, actionLabel: String) {
     val positionSec = PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.Track.POSITION) ?: -1
     if (positionSec < 0) return
+    val forcePosition = pendingSeekPositionMs != null
+    var positionApplied = false
     stateRepository.updatePlayback { playback ->
       val durationMs = playback.track.durationMs
-      playback.copy(
-        track = playback.track.copy(
-          positionMs = normalizePositionMs(positionSec.toLong() * 1000L, durationMs)
-        )
+      val incomingPositionMs = normalizePositionMs(positionSec.toLong() * 1000L, durationMs)
+      val shouldApplyPosition = PositionCorrectionPolicy.shouldApply(
+        currentPositionMs = playback.track.positionMs,
+        incomingPositionMs = incomingPositionMs,
+        playbackState = playback.state,
+        force = forcePosition
       )
+      if (shouldApplyPosition) positionApplied = true
+      if (shouldApplyPosition) {
+        playback.copy(track = playback.track.copy(positionMs = incomingPositionMs))
+      } else {
+        playback
+      }
     }
-    stateRepository.recordPowerampEvent("Position sync ($actionLabel): ${positionSec}s")
+    if (positionApplied && forcePosition) {
+      pendingSeekPositionMs = null
+    }
+    stateRepository.recordPowerampEvent(
+      "Position sync ($actionLabel): ${positionSec}s applied=$positionApplied force=$forcePosition"
+    )
   }
 
   private fun sendCommand(command: Int, configure: (Intent) -> Unit = {}): Boolean {

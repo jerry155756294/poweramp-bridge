@@ -5,6 +5,7 @@ import com.jerry155756294.powerampbridge.bridge.PowerampQueueItem
 import com.jerry155756294.powerampbridge.bridge.PowerampRadioStation
 import com.jerry155756294.powerampbridge.bridge.PowerampController
 import com.jerry155756294.powerampbridge.bridge.PowerampLibraryPage
+import com.jerry155756294.powerampbridge.bridge.PowerampPlaylistPage
 import com.jerry155756294.powerampbridge.bridge.QueueCommandResult
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -97,6 +98,36 @@ class MbrcProtocolAdapterTest {
       assertFalse(data.getBoolean("accepted"))
       assertTrue(data.getBoolean("unsupported"))
     }
+  }
+
+  @Test
+  fun `playlistlist returns Poweramp playlist urls in a paged response`() {
+    controller.playlistPage = PowerampPlaylistPage(
+      total = 1,
+      offset = 0,
+      limit = 20,
+      data = listOf(
+        mapOf(
+          "name" to "Favorites",
+          "url" to "content://com.maxmpz.audioplayer.data/playlists/7"
+        )
+      )
+    )
+
+    val data = JSONObject(
+      adapter.handleCommand(
+        IncomingMessage(ProtocolConstants.PlaylistList, mapOf("offset" to 0, "limit" to 20))
+      ).single()
+    ).getJSONObject("data")
+    val playlist = data.getJSONArray("data").getJSONObject(0)
+
+    assertEquals(1, data.getInt("total"))
+    assertEquals(20, data.getInt("limit"))
+    assertEquals("Favorites", playlist.getString("name"))
+    assertEquals(
+      "content://com.maxmpz.audioplayer.data/playlists/7",
+      playlist.getString("url")
+    )
   }
 
   @Test
@@ -225,6 +256,19 @@ class MbrcProtocolAdapterTest {
 
     assertEquals(ProtocolConstants.CommandUnavailable, json.getString("context"))
     assertEquals(ProtocolConstants.PlaylistPlay, json.getString("data"))
+  }
+
+  @Test
+  fun `playlistplay returns true after opening the Poweramp playlist uri`() {
+    val path = "content://com.maxmpz.audioplayer.data/playlists/7"
+
+    val reply = adapter.handleCommand(
+      IncomingMessage(ProtocolConstants.PlaylistPlay, mapOf("url" to path))
+    ).single()
+
+    assertEquals(ProtocolConstants.PlaylistPlay, JSONObject(reply).getString("context"))
+    assertTrue(JSONObject(reply).getBoolean("data"))
+    assertEquals(path, controller.playedPath)
   }
 
   @Test
@@ -388,6 +432,7 @@ class MbrcProtocolAdapterTest {
     var queueItems: List<PowerampQueueItem> = emptyList()
     var radioStations: List<PowerampRadioStation> = emptyList()
     var libraryPages: Map<String, PowerampLibraryPage> = emptyMap()
+    var playlistPage: PowerampPlaylistPage = PowerampPlaylistPage(0, 0, 800, emptyList())
     var libraryNavigation: Map<String, List<Map<String, Any?>>> = emptyMap()
     var libraryCoverPayload: Map<String, Any?> = mapOf("status" to 404, "cover" to null)
     var queueCommandResult: QueueCommandResult = QueueCommandResult(200, true, "ok")
@@ -409,6 +454,7 @@ class MbrcProtocolAdapterTest {
     override fun readRadioStations(): List<PowerampRadioStation> = radioStations
     override fun readLibraryPage(context: String, offset: Int, limit: Int): PowerampLibraryPage =
       libraryPages[context] ?: PowerampLibraryPage(0, offset, limit, emptyList())
+    override fun readPlaylistPage(offset: Int, limit: Int): PowerampPlaylistPage = playlistPage
     override fun readLibraryNavigation(context: String, query: String): List<Map<String, Any?>> =
       libraryNavigation[context].orEmpty()
     override fun readLibraryCover(request: Map<*, *>?): Map<String, Any?> = libraryCoverPayload

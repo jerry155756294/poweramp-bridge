@@ -4,6 +4,7 @@ import com.jerry155756294.powerampbridge.BuildConfig
 import com.jerry155756294.powerampbridge.bridge.BridgeStateRepository
 import com.jerry155756294.powerampbridge.bridge.BridgeUiState
 import com.jerry155756294.powerampbridge.bridge.PowerampController
+import com.jerry155756294.powerampbridge.bridge.PowerampPlaylistPage
 import org.json.JSONObject
 
 class MbrcProtocolAdapter(
@@ -120,8 +121,15 @@ class MbrcProtocolAdapter(
       ProtocolConstants.RadioStations ->
         listOf(codec.encode(ProtocolConstants.RadioStations, pagedRadioPayload(pageRequest(message.data))))
 
-      ProtocolConstants.PlaylistList ->
-        listOf(codec.encode(message.context, emptyPage(pageRequest(message.data))))
+      ProtocolConstants.PlaylistList -> {
+        val request = pageRequest(message.data)
+        val page = powerampGateway.readPlaylistPage(request.offset, request.limit)
+        if (!page.available) {
+          commandUnavailable(message.context)
+        } else {
+          listOf(codec.encode(message.context, playlistPayload(page)))
+        }
+      }
 
       ProtocolConstants.BrowseGenres,
       ProtocolConstants.BrowseArtists,
@@ -180,8 +188,12 @@ class MbrcProtocolAdapter(
         if (path.isNullOrBlank()) {
           commandUnavailable(ProtocolConstants.PlaylistPlay)
         } else {
-          stateRepository.recordProtocolEvent("radio_play_candidate_context:${message.context}:path=$path")
-          commandResult(powerampGateway.playPath(path), ProtocolConstants.PlaylistPlay)
+          stateRepository.recordProtocolEvent("playlist_play_context:${message.context}:path=$path")
+          if (powerampGateway.playPath(path)) {
+            listOf(codec.encode(ProtocolConstants.PlaylistPlay, true))
+          } else {
+            commandUnavailable(ProtocolConstants.PlaylistPlay)
+          }
         }
       }
 
@@ -374,6 +386,14 @@ class MbrcProtocolAdapter(
     )
   }
 
+  private fun playlistPayload(page: PowerampPlaylistPage): Map<String, Any> =
+    mapOf(
+      "total" to page.total,
+      "offset" to page.offset,
+      "limit" to page.limit,
+      "data" to page.data
+    )
+
   private fun detailsPayload(state: BridgeUiState): Map<String, String> {
     val track = state.playback.track
     return mapOf(
@@ -403,13 +423,6 @@ class MbrcProtocolAdapter(
       "duration" to (track.durationMs / 1000L).toString()
     )
   }
-
-  private fun emptyPage(request: PageRequest): Map<String, Any> = mapOf(
-    "total" to 0,
-    "offset" to request.offset,
-    "limit" to request.limit,
-    "data" to emptyList<Map<String, Any>>()
-  )
 
   private fun extension(path: String): String =
     path.substringAfterLast('.', "").uppercase()

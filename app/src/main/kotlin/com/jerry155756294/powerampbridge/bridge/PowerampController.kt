@@ -10,6 +10,7 @@ interface PowerampController {
   fun readQueueItems(): List<PowerampQueueItem>
   fun readRadioStations(): List<PowerampRadioStation>
   fun readLibraryPage(context: String, offset: Int, limit: Int): PowerampLibraryPage
+  fun readPlaylistPage(offset: Int, limit: Int): PowerampPlaylistPage
   fun readLibraryNavigation(context: String, query: String): List<Map<String, Any?>>
   fun readLibraryCover(request: Map<*, *>?): Map<String, Any?>
   fun playPause(): Boolean

@@ -96,3 +96,29 @@ data class PowerampLibraryPage(
   val data: List<Map<String, Any?>>,
   val available: Boolean = true
 )
+
+/** A read-only MBRC playlist response backed by Poweramp's playlist provider. */
+data class PowerampPlaylistPage(
+  val total: Int,
+  val offset: Int,
+  val limit: Int,
+  val data: List<Map<String, Any?>>,
+  val available: Boolean = true
+)
+
+/**
+ * Poweramp broadcasts positions as whole seconds while the bridge ticker advances in smaller
+ * increments. Ignore small corrections during playback so the sender sees a monotonic clock.
+ */
+internal object PositionCorrectionPolicy {
+  const val SMALL_DRIFT_MS = 1_000L
+
+  fun shouldApply(
+    currentPositionMs: Long,
+    incomingPositionMs: Long,
+    playbackState: String,
+    force: Boolean = false
+  ): Boolean = force ||
+    playbackState != "playing" ||
+    kotlin.math.abs(incomingPositionMs - currentPositionMs) > SMALL_DRIFT_MS
+}

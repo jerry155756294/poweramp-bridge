@@ -19,6 +19,43 @@ import org.robolectric.annotation.Config
 @Config(sdk = [35])
 class PowerampGatewayTest {
   @Test
+  fun `position correction ignores small playing drift`() {
+    assertFalse(
+      PositionCorrectionPolicy.shouldApply(
+        currentPositionMs = 10_000L,
+        incomingPositionMs = 9_000L,
+        playbackState = "playing"
+      )
+    )
+    assertTrue(
+      PositionCorrectionPolicy.shouldApply(
+        currentPositionMs = 10_000L,
+        incomingPositionMs = 8_500L,
+        playbackState = "playing"
+      )
+    )
+  }
+
+  @Test
+  fun `position correction applies exact position while paused or forced`() {
+    assertTrue(
+      PositionCorrectionPolicy.shouldApply(
+        currentPositionMs = 10_000L,
+        incomingPositionMs = 9_000L,
+        playbackState = "paused"
+      )
+    )
+    assertTrue(
+      PositionCorrectionPolicy.shouldApply(
+        currentPositionMs = 10_000L,
+        incomingPositionMs = 10_250L,
+        playbackState = "playing",
+        force = true
+      )
+    )
+  }
+
+  @Test
   fun `library track projection uses local music metadata columns instead of stream tags`() {
     val gateway = PowerampGateway(RuntimeEnvironment.getApplication(), BridgeStateRepository())
     val projectionMethod = PowerampGateway::class.java.getDeclaredMethod("libraryTrackProjection")

@@ -54,6 +54,8 @@ class PlaybackCommandPipelineTest {
     override fun readRadioStations(): List<PowerampRadioStation> = emptyList()
     override fun readLibraryPage(context: String, offset: Int, limit: Int): PowerampLibraryPage =
       PowerampLibraryPage(0, offset, limit, emptyList())
+    override fun readPlaylistPage(offset: Int, limit: Int): PowerampPlaylistPage =
+      PowerampPlaylistPage(0, offset, limit, emptyList())
     override fun readLibraryNavigation(context: String, query: String): List<Map<String, Any?>> = emptyList()
     override fun readLibraryCover(request: Map<*, *>?): Map<String, Any?> =
       mapOf("status" to 404, "cover" to null)
