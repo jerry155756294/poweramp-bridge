@@ -316,6 +316,41 @@ class ProtocolSessionManagerTest {
   }
 
   @Test
+  fun `stale broadcast init cannot initialize its replacement`() {
+    manager.registerConnection("broadcast-old", "10.0.0.2")
+    manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast-old",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+
+    manager.registerConnection("broadcast-new", "10.0.0.2")
+    manager.processMessage("broadcast-new", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast-new",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+
+    val staleInit = manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Init, null))
+
+    assertTrue(staleInit.disconnect)
+    assertEquals("stale_broadcast_init", staleInit.disconnectCategory)
+    assertFalse(staleInit.sendInitialSnapshot)
+    assertNull(manager.broadcastSocketId())
+    assertFalse(manager.connectionDebugSnapshot("broadcast-new")?.broadcastInitialized == true)
+
+    val newInit = manager.processMessage("broadcast-new", IncomingMessage(ProtocolConstants.Init, null))
+    assertTrue(newInit.sendInitialSnapshot)
+    assertEquals("broadcast-new", manager.broadcastSocketId())
+  }
+
+  @Test
   fun `replacing broadcast keeps existing request sockets for same logical client`() {
     manager.registerConnection("broadcast-old", "10.0.0.2")
     manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Player, "Android"))

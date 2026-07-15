@@ -5,7 +5,6 @@ import java.io.BufferedWriter
 import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.io.PrintWriter
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -75,14 +74,22 @@ class MbrcProtocolServer(
   }
 
   suspend fun stop() {
-    acceptJob?.cancelAndJoin()
-    acceptJob = null
-    mutex.withLock {
-      sessions.values.forEach { it.close() }
-      sessions.clear()
-    }
-    serverSocket?.close()
+    // Closing the socket is what unblocks ServerSocket.accept(). Cancelling the coroutine first
+    // leaves it parked in the blocking accept call and can prevent the foreground service from
+    // finishing its stop sequence.
+    val socketToClose = serverSocket
     serverSocket = null
+    val jobToJoin = acceptJob
+    acceptJob = null
+    runCatching { socketToClose?.close() }
+    jobToJoin?.cancelAndJoin()
+
+    val sessionsToClose = mutex.withLock {
+      val activeSessions = sessions.values.toList()
+      sessions.clear()
+      activeSessions
+    }
+    sessionsToClose.forEach { it.close() }
     listener.onProtocolEvent("listener_stopped")
   }
 
@@ -91,10 +98,15 @@ class MbrcProtocolServer(
     val target = mutex.withLock { sessions[socketId] } ?: return
 
     val sentContexts = mutableListOf<String>()
-    messages.forEach { payload ->
+    for (payload in messages) {
       val context = codec.parse(payload).context
+      try {
+        target.send(payload)
+      } catch (error: IOException) {
+        handleOutboundFailure(socketId, target, error)
+        return
+      }
       mutex.withLock { protocolManager.markOutgoingContext(socketId, context) }
-      target.send(payload)
       sentContexts += context
     }
     listener.onBroadcastTraffic(sentContexts)
@@ -105,8 +117,13 @@ class MbrcProtocolServer(
     val target = mutex.withLock { sessions[socketId] } ?: return false
     val payload = codec.encode(ProtocolConstants.Ping, "")
 
+    try {
+      target.send(payload)
+    } catch (error: IOException) {
+      handleOutboundFailure(socketId, target, error)
+      return false
+    }
     mutex.withLock { protocolManager.markOutgoingContext(socketId, ProtocolConstants.Ping) }
-    target.send(payload)
     listener.onProtocolEvent("keepalive_ping:${shortSocketId(socketId)}")
     listener.onBroadcastTraffic(listOf(ProtocolConstants.Ping))
     return true
@@ -138,7 +155,7 @@ class MbrcProtocolServer(
         }
         result.probeAddress?.let { listener.onProbe(it) }
         result.rejectionReason?.let { reason ->
-          protocolManager.connectionDebugSnapshot(socketId)?.let { snapshot ->
+          mutex.withLock { protocolManager.connectionDebugSnapshot(socketId) }?.let { snapshot ->
             listener.onConnectionRejected(snapshot, reason)
           }
           listener.onProtocolEvent("socket_rejected:${shortSocketId(socketId)}:$reason")
@@ -214,8 +231,8 @@ class MbrcProtocolServer(
   ) {
     val sentContexts = mutableListOf<String>()
     replies.forEach { reply ->
-      mutex.withLock { protocolManager.markOutgoingContext(socketId, reply.context) }
       session.send(codec.encode(reply.context, reply.data))
+      mutex.withLock { protocolManager.markOutgoingContext(socketId, reply.context) }
       sentContexts += reply.context
     }
     if (sentContexts.isNotEmpty() && isBroadcastSocket(socketId)) {
@@ -231,8 +248,8 @@ class MbrcProtocolServer(
     val sentContexts = mutableListOf<String>()
     replies.forEach { payload ->
       val context = codec.parse(payload).context
-      mutex.withLock { protocolManager.markOutgoingContext(socketId, context) }
       session.send(payload)
+      mutex.withLock { protocolManager.markOutgoingContext(socketId, context) }
       sentContexts += context
     }
     if (sentContexts.isNotEmpty() && isBroadcastSocket(socketId)) {
@@ -249,6 +266,17 @@ class MbrcProtocolServer(
       }
     }
     staleSessions.forEach { it.close() }
+  }
+
+  private suspend fun handleOutboundFailure(
+    socketId: String,
+    session: ClientSession,
+    error: IOException
+  ) {
+    val category = "socket_write_error:${error.javaClass.simpleName}"
+    mutex.withLock { protocolManager.markDisconnectCategory(socketId, category) }
+    session.close()
+    listener.onProtocolEvent("socket_write_error:${shortSocketId(socketId)}:${error.javaClass.simpleName}")
   }
 
   private fun isExpectedSocketClose(error: IOException): Boolean {
@@ -269,7 +297,7 @@ class MbrcProtocolServer(
   ) {
     private val rawSocket = socket
     val reader: BufferedReader = BufferedReader(InputStreamReader(socket.getInputStream()))
-    private val writer = PrintWriter(BufferedWriter(OutputStreamWriter(socket.getOutputStream())), true)
+    private val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream()))
     private val mutex = Mutex()
 
     suspend fun send(payload: String) {
@@ -280,9 +308,11 @@ class MbrcProtocolServer(
     }
 
     fun close() {
+      // readLine() can be blocked while holding BufferedReader's lock. Close the raw socket
+      // first so that read unblocks before attempting to close the wrapped reader/writer.
+      runCatching { rawSocket.close() }
       runCatching { reader.close() }
       runCatching { writer.close() }
-      runCatching { rawSocket.close() }
     }
   }
 }

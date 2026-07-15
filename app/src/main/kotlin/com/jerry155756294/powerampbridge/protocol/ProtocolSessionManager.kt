@@ -237,6 +237,13 @@ class ProtocolSessionManager(
       return ProtocolEngineResult(disconnect = true, disconnectCategory = "protocol_violation_before_init")
     }
 
+    // A same-client reconnect replaces the broadcast socket before the old socket is closed.
+    // Do not let a delayed init from that old socket mark the replacement as ready or receive
+    // the initial snapshot intended for the new connection.
+    if (logicalClient?.broadcastSocketId != connection.socketId) {
+      return ProtocolEngineResult(disconnect = true, disconnectCategory = "stale_broadcast_init")
+    }
+
     connection.handshakeState = HandshakeState.READY
     logicalClient = logicalClient?.copy(broadcastInitialized = true)
 
