@@ -22,6 +22,7 @@ object ProtocolConstants {
   const val NowPlayingPosition = "nowplayingposition"
   const val NowPlayingDetails = "nowplayingdetails"
   const val NowPlayingList = "nowplayinglist"
+  const val NowPlayingListChanged = "nowplayinglistchanged"
   const val NowPlayingListPlay = "nowplayinglistplay"
   const val NowPlayingQueue = "nowplayingqueue"
   const val NowPlayingCover = "nowplayingcover"

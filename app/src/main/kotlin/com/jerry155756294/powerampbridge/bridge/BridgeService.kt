@@ -52,6 +52,7 @@ class BridgeService : Service() {
   private var lastBroadcastPositionMs: Long? = null
   private var lastCoverSignalTrackId: Long? = null
   private var lastCoverSignalRevision: Long? = null
+  private var lastQueueSignalRevision: Long? = null
   private var lastLyricsSignalTrackKey: String? = null
   private var pendingLatencyMeasurement: PendingLatencyMeasurement? = null
   private var latencyTimeoutJob: Job? = null
@@ -154,6 +155,7 @@ class BridgeService : Service() {
         lastBroadcastPositionMs = state.playback.track.positionMs
         lastCoverSignalTrackId = state.playback.track.realId
         lastCoverSignalRevision = state.coverSignalRevision
+        lastQueueSignalRevision = state.queueSignalRevision
         lastLyricsSignalTrackKey = lyricsTrackKey(state)
         stateRepository.recordProtocolEvent("lyrics_initial_broadcast:track=${lyricsTrackKey(state)}")
         return initialMessages + adapter.lyricsMessage()
@@ -169,6 +171,7 @@ class BridgeService : Service() {
           lastBroadcastPositionMs = null
           lastCoverSignalTrackId = null
           lastCoverSignalRevision = null
+          lastQueueSignalRevision = null
           lastLyricsSignalTrackKey = null
         }
       }
@@ -329,6 +332,7 @@ class BridgeService : Service() {
             state.coverSignalRevision != lastCoverSignalRevision
         val lyricsTrackKey = lyricsTrackKey(senderState)
         val shouldSendLyricsSignal = lyricsTrackKey != lastLyricsSignalTrackKey
+        val shouldSendQueueSignal = state.queueSignalRevision != lastQueueSignalRevision
 
         val statusChanged = statusPayload != lastStatusBroadcastPayload
         val messages = buildList {
@@ -344,6 +348,9 @@ class BridgeService : Service() {
           if (shouldSendCoverSignal) {
             add(adapter.coverStatusMessage())
           }
+          if (shouldSendQueueSignal) {
+            add(adapter.nowPlayingListChangedMessage())
+          }
         }
 
         if (messages.isNotEmpty() || shouldSendLyricsSignal) {
@@ -353,6 +360,9 @@ class BridgeService : Service() {
           if (shouldSendCoverSignal) {
             lastCoverSignalTrackId = senderState.playback.track.realId
             lastCoverSignalRevision = senderState.coverSignalRevision
+          }
+          if (shouldSendQueueSignal) {
+            lastQueueSignalRevision = state.queueSignalRevision
           }
           if (shouldSendLyricsSignal) {
             lastLyricsSignalTrackKey = lyricsTrackKey

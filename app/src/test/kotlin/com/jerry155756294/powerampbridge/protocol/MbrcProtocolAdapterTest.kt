@@ -259,6 +259,50 @@ class MbrcProtocolAdapterTest {
   }
 
   @Test
+  fun `nowplayingqueue returns the active Poweramp category instead of stale manual queue`() {
+    controller.queueItems = listOf(
+      PowerampQueueItem(queueId = 10L, fileId = 101L, title = "Stale queue item")
+    )
+    controller.nowPlayingItems = listOf(
+      PowerampQueueItem(
+        fileId = 202L,
+        title = "Album category item",
+        artist = "Artist",
+        album = "Album",
+        path = "/music/category.flac",
+        playUri = "content://com.maxmpz.audioplayer.data/albums/2/files/202"
+      )
+    )
+
+    val reply = adapter.handleCommand(IncomingMessage(ProtocolConstants.NowPlayingQueue, null)).single()
+    val item = JSONObject(reply).getJSONObject("data").getJSONArray("data").getJSONObject(0)
+
+    assertEquals("Album category item", item.getString("title"))
+    assertEquals(202L, item.getLong("id"))
+  }
+
+  @Test
+  fun `nowplayinglistplay dispatches into the active Poweramp category`() {
+    controller.nowPlayingItems = listOf(
+      PowerampQueueItem(fileId = 202L, title = "Album category item", playUri = "content://example/files/202")
+    )
+
+    adapter.handleCommand(
+      IncomingMessage(ProtocolConstants.NowPlayingListPlay, 1)
+    )
+
+    assertEquals(1, controller.playedQueuePosition)
+  }
+
+  @Test
+  fun `nowplaying list changed message uses the mbrc context`() {
+    val message = JSONObject(adapter.nowPlayingListChangedMessage())
+
+    assertEquals(ProtocolConstants.NowPlayingListChanged, message.getString("context"))
+    assertEquals(true, message.getBoolean("data"))
+  }
+
+  @Test
   fun `nowplayingqueue falls back to current track when queue is empty`() {
     repository.updatePlayback {
       it.copy(
@@ -340,6 +384,7 @@ class MbrcProtocolAdapterTest {
     var coverPayload: Map<String, Any?> = mapOf("status" to 404, "cover" to null)
     var lyricsPayload: Map<String, Any> = mapOf("status" to 404, "lyrics" to "")
     var coverPayloadCalls = 0
+    var nowPlayingItems: List<PowerampQueueItem> = emptyList()
     var queueItems: List<PowerampQueueItem> = emptyList()
     var radioStations: List<PowerampRadioStation> = emptyList()
     var libraryPages: Map<String, PowerampLibraryPage> = emptyMap()
@@ -359,6 +404,7 @@ class MbrcProtocolAdapterTest {
       return coverPayload
     }
     override fun currentLyricsPayload(): Map<String, Any> = lyricsPayload
+    override fun readNowPlayingItems(): List<PowerampQueueItem> = nowPlayingItems.ifEmpty { queueItems }
     override fun readQueueItems(): List<PowerampQueueItem> = queueItems
     override fun readRadioStations(): List<PowerampRadioStation> = radioStations
     override fun readLibraryPage(context: String, offset: Int, limit: Int): PowerampLibraryPage =

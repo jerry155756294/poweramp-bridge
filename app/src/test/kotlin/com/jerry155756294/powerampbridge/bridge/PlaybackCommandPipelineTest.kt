@@ -49,6 +49,7 @@ class PlaybackCommandPipelineTest {
     override fun currentCoverStatus(): Int = 404
     override fun currentCoverPayload(): Map<String, Any?> = emptyMap()
     override fun currentLyricsPayload(): Map<String, Any> = mapOf("status" to 404, "lyrics" to "")
+    override fun readNowPlayingItems(): List<PowerampQueueItem> = emptyList()
     override fun readQueueItems(): List<PowerampQueueItem> = emptyList()
     override fun readRadioStations(): List<PowerampRadioStation> = emptyList()
     override fun readLibraryPage(context: String, offset: Int, limit: Int): PowerampLibraryPage =

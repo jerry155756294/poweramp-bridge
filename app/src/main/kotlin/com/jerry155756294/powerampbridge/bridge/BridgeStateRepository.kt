@@ -268,6 +268,13 @@ class BridgeStateRepository {
     }
   }
 
+  fun signalQueueChanged(reason: String) {
+    Timber.d("Queue signal: %s", reason)
+    _state.update { current ->
+      current.copy(queueSignalRevision = current.queueSignalRevision + 1L)
+    }
+  }
+
   fun setError(message: String?) {
     if (message != null) {
       Timber.e("Bridge error: %s", message)

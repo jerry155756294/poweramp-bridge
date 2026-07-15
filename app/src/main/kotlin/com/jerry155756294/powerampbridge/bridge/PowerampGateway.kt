@@ -51,9 +51,12 @@ class PowerampGateway(
   private val missingLibraryCoverCache = ConcurrentHashMap<String, Long>()
   private val libraryAlbumArtistCache = ConcurrentHashMap<Long, String>()
   private val libraryAlbumArtistIdCache = ConcurrentHashMap<Long, String>()
+  private val libraryGenreCache = ConcurrentHashMap<Long, String>()
   private val coverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   @Volatile
   private var activeRadioCategory: ActiveRadioCategory? = null
+  @Volatile
+  private var activePlaybackCategory: ActivePlaybackCategory? = null
 
   private val receiver = object : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -209,6 +212,9 @@ class PowerampGateway(
     }
     val definition = libraryQueryDefinition(libraryContext)
       ?: return unavailableLibraryPage(offset, limit, "unknown_context=$libraryContext")
+    if (libraryContext == "browsetracks" && offset == 0) {
+      refreshLibraryGenreCache()
+    }
     return runCatching {
       context.contentResolver.query(
         definition.uri,
@@ -518,6 +524,7 @@ class PowerampGateway(
   }
 
   private fun libraryTrackProjection(): Array<String> = arrayOf(
+    "${TableDefs.Files._ID} AS file_id",
     "${TableDefs.Files.FULL_PATH} AS src",
     "${TableDefs.Files.ALBUM_ID} AS album_id",
     "${TableDefs.Artists.ARTIST} AS artist",
@@ -529,6 +536,7 @@ class PowerampGateway(
   )
 
   private fun libraryTrackPayload(cursor: Cursor): Map<String, Any?> {
+    val fileId = cursor.longOrNull("file_id") ?: 0L
     val albumId = cursor.longOrNull("album_id") ?: 0L
     val artist = cursor.stringOrBlank("artist")
     return linkedMapOf(
@@ -539,8 +547,74 @@ class PowerampGateway(
       "disc" to (cursor.longOrNull("disc") ?: 0L).toInt(),
       "album" to cursor.stringOrBlank("album"),
       "album_artist" to albumArtistForTrack(albumId, artist),
-      "genre" to "",
+      "genre" to libraryGenreCache[fileId].orEmpty(),
       "year" to cursor.stringOrBlank("year")
+    )
+  }
+
+  /**
+   * Poweramp stores genre membership in a many-to-many table while mbrc persists one string per
+   * track. Read the documented category URIs in name order so a multiply-tagged track has a
+   * stable primary genre across manual syncs.
+   */
+  private fun refreshLibraryGenreCache() {
+    libraryGenreCache.clear()
+    val genresUri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("genres").build()
+    val genres = runCatching {
+      context.contentResolver.query(
+        genresUri,
+        arrayOf(
+          "${TableDefs.Genres._ID} AS genre_id",
+          "${TableDefs.Genres.GENRE} AS genre"
+        ),
+        null,
+        null,
+        "${TableDefs.Genres.GENRE} COLLATE NOCASE"
+      )?.use { cursor ->
+        buildList {
+          while (cursor.moveToNext()) {
+            val id = cursor.longOrNull("genre_id") ?: continue
+            val name = cursor.stringOrBlank("genre")
+            if (id > 0L && name.isNotBlank()) add(id to name)
+          }
+        }
+      } ?: emptyList()
+    }.onFailure { error ->
+      Timber.w(error, "Failed querying Poweramp genres for library sync")
+      stateRepository.recordPowerampEvent(
+        "Library genre index failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.getOrDefault(emptyList())
+
+    genres.forEach { (genreId, genre) ->
+      val filesUri = PowerampAPI.ROOT_URI.buildUpon()
+        .appendEncodedPath("genres")
+        .appendEncodedPath(genreId.toString())
+        .appendEncodedPath("files")
+        .build()
+      runCatching {
+        context.contentResolver.query(
+          filesUri,
+          arrayOf("${TableDefs.Files._ID} AS file_id"),
+          null,
+          null,
+          null
+        )?.use { cursor ->
+          while (cursor.moveToNext()) {
+            cursor.longOrNull("file_id")?.takeIf { it > 0L }?.let { fileId ->
+              libraryGenreCache.merge(fileId, genre, ::primaryGenre)
+            }
+          }
+        }
+      }.onFailure { error ->
+        Timber.w(error, "Failed querying Poweramp genre files: %s", genre)
+        stateRepository.recordPowerampEvent(
+          "Library genre files failed: genre=$genre ${error.javaClass.simpleName}"
+        )
+      }
+    }
+    stateRepository.recordProtocolEvent(
+      "library_genre_index:genres=${genres.size} tracks=${libraryGenreCache.size}"
     )
   }
 
@@ -558,6 +632,26 @@ class PowerampGateway(
     val digest = MessageDigest.getInstance("SHA-1")
     digest.update("mbrc-cover-v1:$size:".toByteArray(Charsets.UTF_8))
     return digest.digest(bytes).joinToString("") { "%02x".format(it) }
+  }
+
+  override fun readNowPlayingItems(): List<PowerampQueueItem> {
+    if (!refreshAvailability()) return emptyList()
+    val category = activePlaybackCategory
+    if (category != null) {
+      val categoryItems = readActivePlaybackCategoryItems(category)
+      if (categoryItems.isEmpty()) {
+        stateRepository.recordProtocolEvent(
+          "nowplaying_list_source:poweramp_category_empty path=${category.categoryUri.path}"
+        )
+        // Do not expose an unrelated persistent queue when the active category cannot be read.
+        return emptyList()
+      }
+      stateRepository.recordProtocolEvent(
+        "nowplaying_list_source:poweramp_category path=${category.categoryUri.path} total=${categoryItems.size}"
+      )
+      return categoryItems
+    }
+    return readQueueItems()
   }
 
   override fun readQueueItems(): List<PowerampQueueItem> {
@@ -723,6 +817,65 @@ class PowerampGateway(
         "Radio query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
       )
     }.getOrDefault(emptyList())
+  }
+
+  private fun readActivePlaybackCategoryItems(
+    category: ActivePlaybackCategory
+  ): List<PowerampQueueItem> {
+    val categoryUri = category.categoryUri.buildUpon()
+      .appendQueryParameter("lim", "800")
+      .build()
+    val entryIdColumn = categoryEntryIdColumn(category.categoryUri)
+    val isQueueCategory = category.categoryUri.pathSegments.contains("queue")
+    return runCatching {
+      context.contentResolver.query(
+        categoryUri,
+        arrayOf(
+          "$entryIdColumn AS entry_id",
+          "${TableDefs.Files._ID} AS file_id",
+          "${TableDefs.Files.TITLE_TAG} AS title",
+          "${TableDefs.Artists.ARTIST} AS artist",
+          "${TableDefs.Albums.ALBUM} AS album",
+          "${TableDefs.Files.URL} AS item_url",
+          "${TableDefs.Files.FULL_PATH} AS item_path"
+        ),
+        null,
+        null,
+        null
+      )?.use { cursor ->
+        buildList {
+          while (cursor.moveToNext()) {
+            val entryId = cursor.longOrNull("entry_id") ?: continue
+            val fileId = cursor.longOrNull("file_id")
+            val playUri = category.categoryUri.buildUpon()
+              .appendEncodedPath(entryId.toString())
+              .build()
+            add(
+              PowerampQueueItem(
+                queueId = entryId.takeIf { isQueueCategory },
+                fileId = fileId,
+                title = cursor.stringOrBlank("title"),
+                artist = cursor.stringOrBlank("artist"),
+                album = cursor.stringOrBlank("album"),
+                path = cursor.firstNonBlank("item_url", "item_path"),
+                playUri = playUri.toString()
+              )
+            )
+          }
+        }
+      } ?: emptyList()
+    }.onFailure { error ->
+      Timber.w(error, "Failed querying active Poweramp playback category: %s", category.categoryUri)
+      stateRepository.recordPowerampEvent(
+        "Now playing category query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.getOrDefault(emptyList())
+  }
+
+  private fun categoryEntryIdColumn(categoryUri: Uri): String = when {
+    categoryUri.pathSegments.contains("queue") -> TableDefs.Queue._ID
+    categoryUri.pathSegments.contains("playlists") -> TableDefs.PlaylistEntries._ID
+    else -> TableDefs.Files._ID
   }
 
   private fun readPlaylistRadioStations(): List<PowerampRadioStation> {
@@ -944,8 +1097,8 @@ class PowerampGateway(
       return false
     }
 
-    val item = readQueueItems().getOrNull(position - 1) ?: return false
-    val uri = when {
+    val item = readNowPlayingItems().getOrNull(position - 1) ?: return false
+    val uri = item.playUri?.let(Uri::parse) ?: when {
       item.queueId != null && item.queueId > 0L -> PowerampAPI.ROOT_URI.buildUpon()
         .appendEncodedPath("queue")
         .appendEncodedPath(item.queueId.toString())
@@ -989,30 +1142,38 @@ class PowerampGateway(
       return QueueCommandResult(400, accepted = false, detail = "queue command rejected: empty data")
     }
 
-    return when (normalizedType) {
-      "now", "default" -> {
-        if (paths.size > 1) {
-          return enqueueLibraryPaths(paths, playPath, normalizedType)
-        }
-        val target = playPath?.takeIf { requested ->
-          paths.any { it.equals(requested, ignoreCase = true) }
-        } ?: paths.first()
-        val success = this.playPath(target)
-        QueueCommandResult(
-          code = if (success) 200 else 500,
-          accepted = success,
-          detail = "queue command type=$normalizedType play=$target count=${paths.size}"
-        )
-      }
-
-      "add-all", "next", "last" -> enqueueLibraryPaths(paths, playPath, normalizedType)
-
-      else -> QueueCommandResult(
+    if (normalizedType !in REPLACING_QUEUE_TYPES) {
+      return QueueCommandResult(
         code = 501,
         accepted = false,
         detail = "queue command unsupported: type=$normalizedType count=${paths.size}"
       )
     }
+
+    val resolvedTracks = paths.mapNotNull(::findLibraryTrackByPath)
+    val playbackPlan = QueuePlaybackPlanner.create(paths, playPath, resolvedTracks)
+      ?: return QueueCommandResult(
+        code = 404,
+        accepted = false,
+        detail = "queue paths not fully resolved type=$normalizedType requested=${paths.size} resolved=${resolvedTracks.size}"
+      )
+
+    val result = when (playbackPlan) {
+      is QueuePlaybackPlan.AllTracks -> playAllTracks(playbackPlan.target, normalizedType)
+      is QueuePlaybackPlan.Album -> playAlbum(playbackPlan.target, normalizedType)
+      is QueuePlaybackPlan.RebuildQueue -> rebuildPowerampQueue(
+        playbackPlan.tracks,
+        playbackPlan.target,
+        normalizedType
+      )
+      is QueuePlaybackPlan.DirectPath -> playDirectPathReplacingContext(playbackPlan.path, normalizedType)
+    }
+    if (result.accepted) {
+      stateRepository.signalQueueChanged(
+        "queue_command:type=$normalizedType strategy=${playbackPlan.javaClass.simpleName}"
+      )
+    }
+    return result
   }
 
   override fun seekTo(positionMs: Long): Boolean {
@@ -1029,42 +1190,132 @@ class PowerampGateway(
     }
   }
 
-  private fun enqueueLibraryPaths(
-    paths: List<String>,
-    playPath: String?,
+  private fun playAllTracks(target: PowerampLibraryTrackRef, type: String): QueueCommandResult {
+    val categoryUri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("files")
+      .build()
+    val targetUri = categoryUri.buildUpon().appendEncodedPath(target.fileId.toString()).build()
+    return launchCategoryPlayback(
+      targetUri = targetUri,
+      categoryUri = categoryUri,
+      entryId = target.fileId,
+      type = type,
+      strategy = "all_tracks",
+      source = target.source
+    )
+  }
+
+  private fun playAlbum(target: PowerampLibraryTrackRef, type: String): QueueCommandResult {
+    val categoryUri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("albums")
+      .appendEncodedPath(target.albumId.toString())
+      .appendEncodedPath("files")
+      .build()
+    val targetUri = categoryUri.buildUpon().appendEncodedPath(target.fileId.toString()).build()
+    return launchCategoryPlayback(
+      targetUri = targetUri,
+      categoryUri = categoryUri,
+      entryId = target.fileId,
+      type = type,
+      strategy = "album",
+      source = target.source
+    )
+  }
+
+  private fun playDirectPathReplacingContext(path: String, type: String): QueueCommandResult {
+    val accepted = playPath(path)
+    if (accepted) {
+      setActivePlaybackCategory(null, 0L, "direct_path", signalChange = false)
+    }
+    return QueueCommandResult(
+      code = if (accepted) 200 else 500,
+      accepted = accepted,
+      detail = "queue command type=$type strategy=direct_path play=$path"
+    )
+  }
+
+  private fun launchCategoryPlayback(
+    targetUri: Uri,
+    categoryUri: Uri,
+    entryId: Long,
+    type: String,
+    strategy: String,
+    source: String
+  ): QueueCommandResult {
+    val accepted = openToPlay(targetUri)
+    if (accepted) {
+      // Do this before Poweramp's broadcast arrives so an immediate MBRC list reread cannot
+      // observe the category from the command that was just replaced.
+      setActivePlaybackCategory(
+        categoryUri,
+        entryId,
+        "queue_command:$strategy",
+        signalChange = false
+      )
+    }
+    stateRepository.recordPowerampEvent(
+      "Queue category playback: type=$type strategy=$strategy source=$source accepted=$accepted uri=$targetUri"
+    )
+    return QueueCommandResult(
+      code = if (accepted) 200 else 500,
+      accepted = accepted,
+      detail = "queue command type=$type strategy=$strategy"
+    )
+  }
+
+  private fun rebuildPowerampQueue(
+    tracks: List<PowerampLibraryTrackRef>,
+    targetTrack: PowerampLibraryTrackRef,
     type: String
   ): QueueCommandResult {
-    val fileIds = paths.mapNotNull { path -> findFileIdByPath(path)?.let { path to it } }
-    if (fileIds.isEmpty()) {
-      return QueueCommandResult(404, accepted = false, detail = "queue paths not found count=${paths.size}")
-    }
     val queueUri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("queue").build()
-    val maxSort = context.contentResolver.query(
-      queueUri, arrayOf("MAX(${TableDefs.Queue.SORT})"), null, null, null
-    )?.use { cursor -> if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getInt(0) else 0 } ?: 0
-    var sort = maxSort + 1
+    val cleared = runCatching {
+      context.contentResolver.delete(queueUri, null, null)
+    }.onFailure { error ->
+      Timber.w(error, "Failed clearing Poweramp queue before replacement")
+      stateRepository.recordPowerampEvent(
+        "Queue replace clear failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }.getOrNull()
+    if (cleared == null) {
+      return QueueCommandResult(500, accepted = false, detail = "queue replace clear failed")
+    }
+
+    var sort = 1
     val inserted = buildList {
-      fileIds.forEach { (path, fileId) ->
+      tracks.forEach { track ->
         val values = ContentValues().apply {
-          put(TableDefs.Queue.FOLDER_FILE_ID.substringAfterLast('.'), fileId)
+          put(TableDefs.Queue.FOLDER_FILE_ID.substringAfterLast('.'), track.fileId)
           put(TableDefs.Queue.SORT.substringAfterLast('.'), sort++)
         }
         context.contentResolver.insert(queueUri, values)?.let { entryUri ->
-          add(path to entryUri)
+          add(track.source to entryUri)
         }
       }
     }
-    if (inserted.isEmpty()) {
-      return QueueCommandResult(500, accepted = false, detail = "queue insert failed count=${fileIds.size}")
+    if (inserted.size != tracks.size) {
+      return QueueCommandResult(
+        500,
+        accepted = false,
+        detail = "queue replace insert failed requested=${tracks.size} inserted=${inserted.size}"
+      )
     }
     notifyPowerampQueueChanged()
-    val target = playPath?.let { requested ->
-      inserted.firstOrNull { it.first.equals(requested, ignoreCase = true) }?.second
-    } ?: inserted.first().second
-    val shouldPlay = type == "add-all" || type == "now" || type == "default"
-    val accepted = !shouldPlay || openToPlay(target)
+    val target = inserted.firstOrNull { (path, _) ->
+      path.equals(targetTrack.source, ignoreCase = true)
+    }?.second ?: inserted.first().second
+    val accepted = openToPlay(target)
+    if (accepted) {
+      val entryId = target.lastPathSegment?.toLongOrNull() ?: 0L
+      setActivePlaybackCategory(
+        queueUri,
+        entryId,
+        "queue_command:rebuild_queue",
+        signalChange = false
+      )
+    }
     stateRepository.recordPowerampEvent(
-      "Queue insert: type=$type requested=${paths.size} inserted=${inserted.size} play=$shouldPlay accepted=$accepted"
+      "Queue replace: type=$type cleared=$cleared requested=${tracks.size} inserted=${inserted.size} accepted=$accepted"
     )
     return QueueCommandResult(
       if (accepted) 200 else 500,
@@ -1073,15 +1324,26 @@ class PowerampGateway(
     )
   }
 
-  private fun findFileIdByPath(path: String): Long? = runCatching {
+  private fun findLibraryTrackByPath(path: String): PowerampLibraryTrackRef? = runCatching {
     val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
     context.contentResolver.query(
       uri,
-      arrayOf("${TableDefs.Files._ID} AS file_id"),
+      arrayOf(
+        "${TableDefs.Files._ID} AS file_id",
+        "${TableDefs.Files.ALBUM_ID} AS album_id"
+      ),
       "${TableDefs.Files.FULL_PATH}=? OR ${TableDefs.Files.FILE_PATH}=? OR ${TableDefs.Files.URL}=?",
       arrayOf(path, path, path),
       "${TableDefs.Files._ID} ASC"
-    )?.use { cursor -> if (cursor.moveToFirst()) cursor.longOrNull("file_id") else null }
+    )?.use { cursor ->
+      if (!cursor.moveToFirst()) return@use null
+      val fileId = cursor.longOrNull("file_id") ?: return@use null
+      PowerampLibraryTrackRef(
+        source = path,
+        fileId = fileId,
+        albumId = cursor.longOrNull("album_id") ?: 0L
+      )
+    }
   }.getOrNull()
 
   private fun notifyPowerampQueueChanged() {
@@ -1302,6 +1564,7 @@ class PowerampGateway(
     val positionSec = PowerampBroadcastDiagnostics.readInt(intent.extras, PowerampAPI.Track.POSITION) ?: -1
     val durationMs = PowerampBroadcastDiagnostics.extractDurationMs(track)
     val realId = PowerampBroadcastDiagnostics.readLong(track, PowerampAPI.Track.REAL_ID) ?: 0L
+    captureActivePlaybackCategory(track)
     captureActiveRadioCategory(track)
     stateRepository.updatePlayback { playback ->
       playback.copy(
@@ -1336,6 +1599,35 @@ class PowerampGateway(
     stateRepository.recordPowerampEvent(
       "Track changed ($actionLabel): ${track.getString(PowerampAPI.Track.TITLE).orEmpty()}"
     )
+  }
+
+  @Suppress("DEPRECATION")
+  private fun captureActivePlaybackCategory(track: Bundle) {
+    val categoryUri = track.getParcelable(PowerampAPI.Track.CAT_URI) as? Uri
+    setActivePlaybackCategory(
+      categoryUri = categoryUri,
+      entryId = PowerampBroadcastDiagnostics.readLong(track, PowerampAPI.Track.ID) ?: 0L,
+      reason = "track_broadcast"
+    )
+  }
+
+  private fun setActivePlaybackCategory(
+    categoryUri: Uri?,
+    entryId: Long,
+    reason: String,
+    signalChange: Boolean = true
+  ) {
+    val previous = activePlaybackCategory
+    val next = categoryUri?.let { ActivePlaybackCategory(it, entryId) }
+    activePlaybackCategory = next
+    if (previous?.categoryUri != next?.categoryUri) {
+      stateRepository.recordPowerampEvent(
+        "Playback category captured: reason=$reason uri=${categoryUri ?: "none"} entry=$entryId"
+      )
+      if (signalChange) {
+        stateRepository.signalQueueChanged("playback_category:$reason:${categoryUri?.path ?: "cleared"}")
+      }
+    }
   }
 
   @Suppress("DEPRECATION")
@@ -1825,6 +2117,7 @@ class PowerampGateway(
     const val MIN_LIBRARY_COVER_SIZE = 64
     const val MAX_LIBRARY_COVER_SIZE = 256
     const val LIBRARY_COVER_JPEG_QUALITY = 80
+    val REPLACING_QUEUE_TYPES = setOf("now", "default", "next", "last", "add-all")
   }
 }
 
@@ -1835,6 +2128,11 @@ private data class ActiveRadioCategory(
   val artist: String,
   val album: String,
   val path: String
+)
+
+private data class ActivePlaybackCategory(
+  val categoryUri: Uri,
+  val entryId: Long
 )
 
 private fun Cursor.stringOrBlank(columnName: String): String =

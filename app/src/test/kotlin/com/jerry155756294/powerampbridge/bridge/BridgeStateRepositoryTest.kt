@@ -103,6 +103,14 @@ class BridgeStateRepositoryTest {
   }
 
   @Test
+  fun `queue signal revision increments when playback context changes`() {
+    repository.signalQueueChanged("all_tracks")
+    repository.signalQueueChanged("album")
+
+    assertEquals(2L, repository.state.value.queueSignalRevision)
+  }
+
+  @Test
   fun `cover state transitions update summary and sender signal`() {
     repository.updateCoverState(
       CoverSnapshot(

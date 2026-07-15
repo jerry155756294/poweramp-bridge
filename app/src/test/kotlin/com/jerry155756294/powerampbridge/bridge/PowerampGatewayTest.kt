@@ -38,11 +38,16 @@ class PowerampGatewayTest {
   fun `library track payload keeps local metadata fields`() {
     val gateway = PowerampGateway(RuntimeEnvironment.getApplication(), BridgeStateRepository())
     val cursor = MatrixCursor(
-      arrayOf("src", "album_id", "artist", "title", "trackno", "disc", "album", "year")
+      arrayOf("file_id", "src", "album_id", "artist", "title", "trackno", "disc", "album", "year")
     ).apply {
-      addRow(arrayOf<Any?>("/music/one.flac", 0L, "Artist", "Song", 2L, 1L, "Album", "2024"))
+      addRow(arrayOf<Any?>(42L, "/music/one.flac", 0L, "Artist", "Song", 2L, 1L, "Album", "2024"))
       assertTrue(moveToFirst())
     }
+    @Suppress("UNCHECKED_CAST")
+    val genreCache = PowerampGateway::class.java.getDeclaredField("libraryGenreCache")
+      .apply { isAccessible = true }
+      .get(gateway) as MutableMap<Long, String>
+    genreCache[42L] = "Jazz"
     val payloadMethod = PowerampGateway::class.java.getDeclaredMethod(
       "libraryTrackPayload",
       Cursor::class.java
@@ -54,6 +59,7 @@ class PowerampGatewayTest {
     assertEquals("Artist", payload["album_artist"])
     assertEquals("Album", payload["album"])
     assertEquals("2024", payload["year"])
+    assertEquals("Jazz", payload["genre"])
   }
 
   @Test

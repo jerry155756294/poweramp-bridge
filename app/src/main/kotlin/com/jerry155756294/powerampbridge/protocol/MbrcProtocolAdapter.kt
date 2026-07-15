@@ -160,7 +160,7 @@ class MbrcProtocolAdapter(
       ProtocolConstants.NowPlayingListPlay -> {
         val position = asInt(message.data)
         if (position != null) {
-          val queueItems = powerampGateway.readQueueItems()
+          val queueItems = powerampGateway.readNowPlayingItems()
           val success = if (queueItems.isNotEmpty()) {
             powerampGateway.playQueuePosition(position)
           } else {
@@ -229,6 +229,9 @@ class MbrcProtocolAdapter(
   fun lyricsMessage(): String =
     codec.encode(ProtocolConstants.NowPlayingLyrics, powerampGateway.currentLyricsPayload())
 
+  fun nowPlayingListChangedMessage(): String =
+    codec.encode(ProtocolConstants.NowPlayingListChanged, true)
+
   private fun pluginVersion(): String = "poweramp-bridge ${BuildConfig.VERSION_NAME}"
 
   private fun statusPayload(state: BridgeUiState): Map<String, Any> = mapOf(
@@ -282,9 +285,9 @@ class MbrcProtocolAdapter(
   }
 
   private fun queueItems(): List<Map<String, Any?>> {
-    val queueItems = powerampGateway.readQueueItems()
+    val queueItems = powerampGateway.readNowPlayingItems()
     if (queueItems.isNotEmpty()) {
-      stateRepository.recordProtocolEvent("queue_reply_source:poweramp_queue total=${queueItems.size}")
+      stateRepository.recordProtocolEvent("queue_reply_source:poweramp_now_playing total=${queueItems.size}")
       return queueItems.mapIndexed { index, item ->
         linkedMapOf<String, Any?>(
           "title" to item.title,
@@ -292,7 +295,7 @@ class MbrcProtocolAdapter(
           "album" to item.album,
           "path" to item.path,
           "position" to (index + 1),
-          "id" to item.queueId,
+          "id" to (item.queueId ?: item.fileId),
           "file_id" to item.fileId
         )
       }

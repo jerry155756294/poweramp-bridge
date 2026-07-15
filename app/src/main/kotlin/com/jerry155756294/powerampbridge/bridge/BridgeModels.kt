@@ -155,6 +155,7 @@ data class BridgeUiState(
   val positionSyncActive: Boolean = false,
   val coverState: CoverSnapshot = CoverSnapshot(),
   val coverSignalRevision: Long = 0L,
+  val queueSignalRevision: Long = 0L,
   val playback: PlaybackSnapshot = PlaybackSnapshot(),
   val senderPlaybackOverride: SenderPlaybackOverride? = null,
   val recentCommands: List<LogEntry> = emptyList(),
