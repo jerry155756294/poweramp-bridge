@@ -18,7 +18,9 @@ class BootReceiver : BroadcastReceiver() {
       try {
         val app = context.applicationContext as BridgeApplication
         val settings = app.appContainer.settingsRepository.settings.first()
-        if (settings.autoStart && settings.startOnBoot) {
+        // App-launch and boot-launch are independent preferences. Boot should not depend on
+        // whether the user also wants the activity-open behavior.
+        if (settings.startOnBoot) {
           BridgeService.start(context)
         }
       } finally {

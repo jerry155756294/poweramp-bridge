@@ -23,7 +23,10 @@ import com.maxmpz.poweramp.player.TableDefs
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
 import java.util.concurrent.ConcurrentHashMap
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -204,6 +207,220 @@ class PowerampGateway(
     return mapOf("status" to status, "lyrics" to lyrics)
   }
 
+  override fun currentTrackDetailsPayload(): Map<String, String> {
+    val track = stateRepository.state.value.playback.track
+    val details = linkedMapOf(
+      "albumArtist" to track.albumArtist,
+      "genre" to track.genre,
+      "trackNo" to track.trackNo,
+      "trackCount" to "",
+      "discNo" to track.discNo,
+      "discCount" to "",
+      "grouping" to "",
+      "publisher" to "",
+      "ratingAlbum" to "",
+      "composer" to "",
+      "comment" to "",
+      "encoder" to "",
+      "kind" to extensionName(track.path),
+      "format" to extensionName(track.path),
+      "size" to "",
+      "channels" to track.channels,
+      "sampleRate" to track.sampleRate,
+      "bitrate" to track.bitrate,
+      "dateModified" to "",
+      "dateAdded" to "",
+      "lastPlayed" to "",
+      "playCount" to "",
+      "skipCount" to "",
+      "duration" to track.durationMs.takeIf { it > 0L }?.toString().orEmpty()
+    )
+
+    if (track.realId > 0L) {
+      readCurrentTrackDetails(track.realId).forEach { (key, value) ->
+        if (value.isNotBlank()) details[key] = value
+      }
+    }
+    localFileForPath(track.path)?.let { file ->
+      readLocalTrackDetails(file).forEach { (key, value) ->
+        if (value.isNotBlank() && details[key].isNullOrBlank()) details[key] = value
+      }
+      if (details["size"].isNullOrBlank()) details["size"] = file.length().toString()
+      if (details["dateModified"].isNullOrBlank()) {
+        details["dateModified"] = formatDateMillis(file.lastModified())
+      }
+    }
+    return details
+  }
+
+  private fun readCurrentTrackDetails(realId: Long): Map<String, String> = runCatching {
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
+    context.contentResolver.query(
+      uri,
+      arrayOf(
+        "${TableDefs.Files.ALBUM_ID} AS album_id",
+        "${TableDefs.Files.ALBUM_ARTIST_ID} AS album_artist_id",
+        "${TableDefs.Files.COMPOSER_ID} AS composer_id",
+        "${TableDefs.Files.TRACK_TAG} AS track_no",
+        "${TableDefs.Files.DISC} AS disc_no",
+        "${TableDefs.Files.DURATION} AS duration_ms",
+        "${TableDefs.Files.FILE_CREATED_AT} AS file_modified_sec",
+        "${TableDefs.Files.CREATED_AT} AS date_added_sec",
+        "${TableDefs.Files.PLAYED_AT} AS last_played_ms",
+        "${TableDefs.Files.PLAYED_FULLY_AT} AS last_played_fully_ms",
+        "${TableDefs.Files.PLAYED_TIMES} AS play_count",
+        "${TableDefs.Files.TOTAL_PLAYED_TIMES} AS total_play_count",
+        "${TableDefs.Files.RATING} AS rating",
+        "${TableDefs.Files.BIT_RATE} AS bit_rate",
+        "${TableDefs.Files.FILE_PATH} AS file_path",
+        "${TableDefs.Files.FULL_PATH} AS full_path",
+        "${TableDefs.Files.URL} AS file_url",
+        "${TableDefs.Artists.ARTIST} AS artist",
+        "${TableDefs.Albums.ALBUM} AS album",
+        "${TableDefs.Files.YEAR} AS year"
+      ),
+      "${TableDefs.Files._ID}=?",
+      arrayOf(realId.toString()),
+      null
+    )?.use { cursor ->
+      if (!cursor.moveToFirst()) return@use emptyMap()
+      val albumId = cursor.longOrNull("album_id") ?: 0L
+      val albumArtist = albumArtistName(cursor.longOrNull("album_artist_id") ?: 0L)
+      val composer = composerName(cursor.longOrNull("composer_id") ?: 0L)
+      val path = cursor.firstNonBlank("file_path", "full_path", "file_url")
+      val trackNo = cursor.longOrNull("track_no")?.takeIf { it > 0L }?.toString().orEmpty()
+      val discNo = cursor.longOrNull("disc_no")?.takeIf { it > 0L }?.toString().orEmpty()
+      val lastPlayed = cursor.longOrNull("last_played_ms")
+        ?.takeIf { it > 0L }
+        ?: cursor.longOrNull("last_played_fully_ms")?.takeIf { it > 0L }
+      val details = linkedMapOf<String, String>()
+      putIfNotBlank(details, "albumArtist", albumArtist)
+      putIfNotBlank(details, "composer", composer)
+      putIfNotBlank(details, "trackNo", trackNo)
+      putIfNotBlank(details, "discNo", discNo)
+      countTracksForAlbum(albumId).takeIf { it > 0 }?.let {
+        details["trackCount"] = it.toString()
+      }
+      countDiscsForAlbum(albumId).takeIf { it > 0 }?.let {
+        details["discCount"] = it.toString()
+      }
+      cursor.longOrNull("duration_ms")?.takeIf { it > 0L }?.let {
+        details["duration"] = it.toString()
+      }
+      cursor.longOrNull("bit_rate")?.takeIf { it > 0L }?.let {
+        details["bitrate"] = it.toString()
+      }
+      cursor.longOrNull("rating")?.takeIf { it > 0L }?.let {
+        details["ratingAlbum"] = it.toString()
+      }
+      cursor.longOrNull("total_play_count")?.takeIf { it >= 0L }?.let {
+        details["playCount"] = it.toString()
+      } ?: cursor.longOrNull("play_count")?.takeIf { it >= 0L }?.let {
+        details["playCount"] = it.toString()
+      }
+      cursor.longOrNull("file_modified_sec")?.takeIf { it > 0L }?.let {
+        details["dateModified"] = formatDateSeconds(it)
+      }
+      cursor.longOrNull("date_added_sec")?.takeIf { it > 0L }?.let {
+        details["dateAdded"] = formatDateSeconds(it)
+      }
+      lastPlayed?.let { details["lastPlayed"] = formatDateMillis(it) }
+      localFileForPath(path)?.let { file ->
+        details.putIfAbsent("size", file.length().toString())
+        details.putIfAbsent("dateModified", formatDateMillis(file.lastModified()))
+      }
+      details
+    } ?: emptyMap()
+  }.onFailure { error ->
+    Timber.d(error, "Unable to read current Poweramp details for real_id=%s", realId)
+  }.getOrDefault(emptyMap())
+
+  private fun readLocalTrackDetails(file: File): Map<String, String> = runCatching {
+    val retriever = MediaMetadataRetriever()
+    try {
+      retriever.setDataSource(file.absolutePath)
+      val details = linkedMapOf<String, String>()
+      val albumArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST).orEmpty()
+      val genre = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE).orEmpty()
+      val composer = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_COMPOSER).orEmpty()
+      val trackNumber = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER).orEmpty()
+      val discNumber = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DISC_NUMBER).orEmpty()
+      putIfNotBlank(details, "albumArtist", albumArtist)
+      putIfNotBlank(details, "genre", genre)
+      putIfNotBlank(details, "composer", composer)
+      putSplitMetadata(details, "trackNo", "trackCount", trackNumber)
+      putSplitMetadata(details, "discNo", "discCount", discNumber)
+      putIfNotBlank(details, "duration", retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION).orEmpty())
+      putIfNotBlank(details, "bitrate", retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE).orEmpty())
+      putIfNotBlank(details, "sampleRate", retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_SAMPLERATE).orEmpty())
+      putIfNotBlank(details, "format", retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE).orEmpty())
+      details
+    } finally {
+      retriever.release()
+    }
+  }.onFailure { error ->
+    Timber.d(error, "Unable to read local metadata for %s", file)
+  }.getOrDefault(emptyMap())
+
+  private fun countDiscsForAlbum(albumId: Long): Int {
+    if (albumId <= 0L) return 0
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
+    return runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf("${TableDefs.Files.DISC} AS disc_no"),
+        "${TableDefs.Files.ALBUM_ID}=?",
+        arrayOf(albumId.toString()),
+        null
+      )?.use { cursor ->
+        buildSet {
+          while (cursor.moveToNext()) {
+            cursor.longOrNull("disc_no")?.takeIf { it > 0L }?.let(::add)
+          }
+        }.size
+      } ?: 0
+    }.getOrDefault(0)
+  }
+
+  private fun composerName(id: Long): String {
+    if (id <= 0L) return ""
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("composers").build()
+    return runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf(TableDefs.Composers.COMPOSER),
+        "${TableDefs.Composers._ID}=?",
+        arrayOf(id.toString()),
+        null
+      )?.use { cursor ->
+        if (cursor.moveToFirst()) cursor.stringOrBlank("composer") else ""
+      } ?: ""
+    }.getOrDefault("")
+  }
+
+  private fun putSplitMetadata(
+    details: MutableMap<String, String>,
+    valueKey: String,
+    countKey: String,
+    raw: String
+  ) {
+    val parts = raw.split('/', limit = 2).map(String::trim)
+    putIfNotBlank(details, valueKey, parts.firstOrNull().orEmpty())
+    putIfNotBlank(details, countKey, parts.getOrNull(1).orEmpty())
+  }
+
+  private fun putIfNotBlank(details: MutableMap<String, String>, key: String, value: String) {
+    if (value.isNotBlank()) details[key] = value
+  }
+
+  private fun formatDateSeconds(value: Long): String = formatDateMillis(value * 1000L)
+
+  private fun formatDateMillis(value: Long): String =
+    if (value <= 0L) "" else SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(value))
+
+  private fun extensionName(path: String): String =
+    path.substringAfterLast('.', "").uppercase(Locale.US)
+
   override fun readLibraryPage(libraryContext: String, offset: Int, limit: Int): PowerampLibraryPage {
     if (!refreshAvailability()) return unavailableLibraryPage(offset, limit, "poweramp_unavailable")
     if (libraryContext == "browsealbums" && offset == 0) {
@@ -271,6 +488,7 @@ class PowerampGateway(
               val playlistUri = PowerampAPI.ROOT_URI.buildUpon()
                 .appendEncodedPath("playlists")
                 .appendEncodedPath(playlistId.toString())
+                .appendEncodedPath("files")
                 .build()
               add(
                 linkedMapOf<String, Any?>(
@@ -314,18 +532,27 @@ class PowerampGateway(
     if (missingUntil != null && missingUntil > SystemClock.elapsedRealtime()) {
       return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
     }
-    val realId = findLibraryCoverRealId(artist, album) ?: run {
+    val candidates = findLibraryCoverCandidates(artist, album)
+    if (candidates.isEmpty()) {
       missingLibraryCoverCache[albumKey] = SystemClock.elapsedRealtime() + NEGATIVE_COVER_CACHE_MS
       return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
     }
-    val cacheKey = "$albumKey\u0000$realId\u0000$size"
-    val cached = libraryCoverCache[cacheKey] ?: loadLibraryCover(realId, size)?.also {
-      libraryCoverCache[cacheKey] = it
-      missingLibraryCoverCache.remove(albumKey)
+
+    val loaded = candidates.firstNotNullOfOrNull { candidate ->
+      val cacheKey = "$albumKey\u0000${candidate.realId}\u0000$size"
+      val cached = libraryCoverCache[cacheKey]
+        ?: loadLibraryCover(candidate, size)?.also { libraryCoverCache[cacheKey] = it }
+      cached?.let { candidate.realId to it }
     } ?: run {
       missingLibraryCoverCache[albumKey] = SystemClock.elapsedRealtime() + NEGATIVE_COVER_CACHE_MS
       return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
     }
+    val realId = loaded.first
+    val cached = loaded.second
+    missingLibraryCoverCache.remove(albumKey)
+    stateRepository.recordPowerampEvent(
+      "Library cover loaded: artist=$artist album=$album real_id=$realId candidates=${candidates.size}"
+    )
     if (requestHash == cached.hash) {
       return mapOf("status" to 304, "artist" to artist, "album" to album, "cover" to null, "hash" to cached.hash)
     }
@@ -415,34 +642,48 @@ class PowerampGateway(
     else -> null
   }
 
-  private fun findLibraryCoverRealId(artist: String, album: String): Long? = runCatching {
+  private fun findLibraryCoverCandidates(
+    artist: String,
+    album: String
+  ): List<LibraryCoverCandidate> = runCatching {
     val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
     context.contentResolver.query(
       uri,
       arrayOf(
         "${TableDefs.Files._ID} AS real_id",
         "${TableDefs.Files.ALBUM_ARTIST_ID} AS album_artist_id",
-        "${TableDefs.Artists.ARTIST} AS track_artist"
+        "${TableDefs.Artists.ARTIST} AS track_artist",
+        "${TableDefs.Files.FULL_PATH} AS track_path",
+        "${TableDefs.Files.URL} AS track_url"
       ),
       "${TableDefs.Albums.ALBUM}=?",
       arrayOf(album),
       "${TableDefs.Files._ID} ASC"
     )?.use { cursor ->
-      var fallbackRealId: Long? = null
-      var matchedRealId: Long? = null
+      val matched = mutableListOf<LibraryCoverCandidate>()
+      val fallback = mutableListOf<LibraryCoverCandidate>()
       while (cursor.moveToNext()) {
         val realId = cursor.longOrNull("real_id") ?: continue
-        if (fallbackRealId == null) fallbackRealId = realId
+        val candidate = LibraryCoverCandidate(
+          realId = realId,
+          sourcePath = cursor.firstNonBlank("track_path", "track_url")
+        )
         val albumArtist = albumArtistName(cursor.longOrNull("album_artist_id") ?: 0L)
           .ifBlank { cursor.stringOrBlank("track_artist") }
-        if (artist.isBlank() || artist == albumArtist) {
-          matchedRealId = realId
-          break
+        val trackArtist = cursor.stringOrBlank("track_artist")
+        if (
+          artist.isBlank() ||
+          artist.equals(albumArtist, ignoreCase = true) ||
+          artist.equals(trackArtist, ignoreCase = true)
+        ) {
+          matched += candidate
+        } else {
+          fallback += candidate
         }
       }
-      if (artist.isBlank()) fallbackRealId else matchedRealId
-    }
-  }.getOrNull()
+      (matched + fallback).distinctBy(LibraryCoverCandidate::realId)
+    } ?: emptyList()
+  }.getOrDefault(emptyList())
 
   private fun firstArtistForAlbum(albumId: Long): String {
     if (albumId <= 0L) return ""
@@ -682,15 +923,73 @@ class PowerampGateway(
     )
   }
 
-  private fun loadLibraryCover(realId: Long, size: Int): LibraryCoverCacheEntry? {
-    val uri = PowerampAPI.AA_ROOT_URI.buildUpon().appendEncodedPath("files").appendEncodedPath(realId.toString()).build()
+  private fun loadLibraryCover(
+    candidate: LibraryCoverCandidate,
+    size: Int
+  ): LibraryCoverCacheEntry? {
+    val uri = PowerampAPI.AA_ROOT_URI.buildUpon()
+      .appendEncodedPath("files")
+      .appendEncodedPath(candidate.realId.toString())
+      .build()
     val result = loadScaledCoverBase64Detailed(uri, size, LIBRARY_COVER_JPEG_QUALITY)
-    val base64 = (result as? CoverLoadResult.Ready)?.base64 ?: return null
+    val base64 = (result as? CoverLoadResult.Ready)?.base64
+      ?: loadFallbackTrackCover(candidate.sourcePath, size)
+      ?: return null
     // Include the requested size in the validator. If the source image is already
     // smaller than two requested sizes, the encoded bytes may be identical; a
     // byte-only hash would then incorrectly return 304 for the wrong variant.
     return LibraryCoverCacheEntry(base64, sha1(size, Base64.decode(base64, Base64.NO_WRAP)))
   }
+
+  private fun loadFallbackTrackCover(sourcePath: String, size: Int): String? {
+    val file = localFileForPath(sourcePath) ?: return null
+    val embedded = runCatching {
+      val retriever = MediaMetadataRetriever()
+      try {
+        retriever.setDataSource(file.absolutePath)
+        retriever.embeddedPicture
+      } finally {
+        retriever.release()
+      }
+    }.onFailure { error ->
+      Timber.d(error, "Unable to read embedded cover from %s", file)
+    }.getOrNull()
+
+    val imageBytes = embedded ?: findSidecarCover(file.parentFile)?.let { sidecar ->
+      runCatching { sidecar.readBytes() }
+        .onFailure { error -> Timber.d(error, "Unable to read sidecar cover %s", sidecar) }
+        .getOrNull()
+    } ?: return null
+
+    return decodeArtworkBase64(imageBytes, size, LIBRARY_COVER_JPEG_QUALITY)
+  }
+
+  private fun findSidecarCover(parent: File?): File? {
+    if (parent == null) return null
+    val names = listOf(
+      "cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
+      "folder.jpg", "folder.jpeg", "folder.png", "folder.webp",
+      "front.jpg", "front.jpeg", "front.png", "front.webp",
+      "albumart.jpg", "albumart.jpeg", "albumart.png", "albumart.webp"
+    )
+    return names.asSequence()
+      .map { File(parent, it) }
+      .firstOrNull(File::isFile)
+  }
+
+  private fun decodeArtworkBase64(bytes: ByteArray, maxDimension: Int, quality: Int): String? =
+    runCatching {
+      val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+      if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+
+      val options = BitmapFactory.Options().apply {
+        inSampleSize = calculateSampleSize(bounds.outWidth, bounds.outHeight, maxDimension)
+      }
+      BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.useScaledBase64(maxDimension, quality)
+    }.onFailure { error ->
+      Timber.d(error, "Unable to decode fallback cover")
+    }.getOrNull()
 
   private fun sha1(size: Int, bytes: ByteArray): String {
     val digest = MessageDigest.getInstance("SHA-1")
@@ -777,39 +1076,14 @@ class PowerampGateway(
     }
 
     val streamStations = readStoredRadioStations()
-    if (streamStations.isNotEmpty()) {
-      stateRepository.recordPowerampEvent("Radio query source=poweramp_streams total=${streamStations.size}")
-      return streamStations
-    }
-
     val playlistStations = readPlaylistRadioStations()
-    if (playlistStations.isNotEmpty()) {
-      stateRepository.recordPowerampEvent(
-        "Radio query source=poweramp_playlists total=${playlistStations.size}"
-      )
-      return playlistStations
-    }
-
     val libraryStations = readLibraryRadioStations()
-    if (libraryStations.isNotEmpty()) {
-      stateRepository.recordPowerampEvent(
-        "Radio query source=poweramp_files total=${libraryStations.size}"
-      )
-      return libraryStations
-    }
-
     // Built-in/imported radio can be exposed as virtual `playlist:` items only. The track
     // broadcast carries a Poweramp category URI that remains a valid OPEN_TO_PLAY target.
     val categoryStations = readActiveRadioCategoryStations()
-    if (categoryStations.isNotEmpty()) {
-      stateRepository.recordPowerampEvent(
-        "Radio query source=poweramp_active_category total=${categoryStations.size}"
-      )
-      return categoryStations
-    }
-
     // Poweramp can load a radio M3U directly into its current queue without creating a row in
-    // the /streams collection. This is the final fallback for playlist-backed radio sources.
+    // the /streams collection. Include those entries as another source instead of hiding them
+    // whenever the streams table happens to contain an unrelated row.
     val rawQueueItems = readQueueItems()
     val queuedStations = rawQueueItems
       .asSequence()
@@ -825,13 +1099,15 @@ class PowerampGateway(
       }
       .toList()
       .normalizeRadioStations()
+    val stations = (
+      streamStations + playlistStations + libraryStations + categoryStations + queuedStations
+      ).normalizeRadioStations()
     stateRepository.recordPowerampEvent(
-      "Radio query source=${if (queuedStations.isEmpty()) "poweramp_queue_no_http" else "poweramp_queue"} " +
-        "streams=${streamStations.size} playlists=${playlistStations.size} files=${libraryStations.size} " +
-        "category=${activeRadioCategory?.categoryUri?.path ?: "none"} " +
-        "queue_total=${rawQueueItems.size} total=${queuedStations.size}"
+      "Radio query sources=streams:${streamStations.size},playlists:${playlistStations.size}," +
+        "files:${libraryStations.size},category:${categoryStations.size}," +
+        "queue_http:${queuedStations.size} queue_total=${rawQueueItems.size} total=${stations.size}"
     )
-    return queuedStations
+    return stations
   }
 
   private fun readStoredRadioStations(): List<PowerampRadioStation> {
@@ -1188,7 +1464,7 @@ class PowerampGateway(
 
     // Poweramp explicitly supports http(s) data URIs for OPEN_TO_PLAY. Using the URL directly
     // also works for playlist-backed radios, which have no usable /streams row to address.
-    val uri = parsePlayableUri(trimmed) ?: return false
+    val uri = canonicalizePlaylistUri(trimmed) ?: parsePlayableUri(trimmed) ?: return false
 
     stateRepository.recordPowerampEvent(
       "Path play dispatch: source=direct_uri target=$uri"
@@ -1868,6 +2144,62 @@ class PowerampGateway(
     else -> Uri.parse(path)
   }
 
+  private fun canonicalizePlaylistUri(path: String): Uri? {
+    val parsed = runCatching { Uri.parse(path) }.getOrNull() ?: return null
+    if (parsed.scheme.equals("playlist", ignoreCase = true)) {
+      val key = listOfNotNull(parsed.host, parsed.path?.trim('/'))
+        .joinToString("/")
+        .trim()
+      if (key.isBlank()) return null
+      val playlist = readPlaylistRows().firstOrNull { (id, name) ->
+        id > 0L && (
+          name.equals(key, ignoreCase = true) ||
+            name.replace(" ", "-").equals(key, ignoreCase = true)
+          )
+      } ?: return null
+      return playlistCategoryUri(playlist.first)
+    }
+
+    if (!parsed.authority.equals(PowerampAPI.AUTHORITY, ignoreCase = true)) return null
+    val segments = parsed.pathSegments
+    if (segments.size == 2 && segments[0].equals("playlists", ignoreCase = true)) {
+      val id = segments[1].toLongOrNull() ?: return null
+      return playlistCategoryUri(id)
+    }
+    return null
+  }
+
+  private fun playlistCategoryUri(playlistId: Long): Uri = PowerampAPI.ROOT_URI.buildUpon()
+    .appendEncodedPath("playlists")
+    .appendEncodedPath(playlistId.toString())
+    .appendEncodedPath("files")
+    .build()
+
+  private fun readPlaylistRows(): List<Pair<Long, String>> {
+    val uri = PowerampAPI.ROOT_URI.buildUpon()
+      .appendEncodedPath("playlists")
+      .build()
+    return runCatching {
+      context.contentResolver.query(
+        uri,
+        arrayOf(
+          "${TableDefs.Playlists._ID} AS playlist_id",
+          "${TableDefs.Playlists.PLAYLIST} AS playlist_name"
+        ),
+        null,
+        null,
+        null
+      )?.use { cursor ->
+        buildList {
+          while (cursor.moveToNext()) {
+            val id = cursor.longOrNull("playlist_id") ?: continue
+            add(id to cursor.stringOrBlank("playlist_name"))
+          }
+        }
+      } ?: emptyList()
+    }.getOrDefault(emptyList())
+  }
+
   private fun normalizePositionMs(positionMs: Long, durationMs: Long): Long {
     val sanitized = positionMs.coerceAtLeast(0L)
     return if (durationMs > 0L) sanitized.coerceAtMost(durationMs) else sanitized
@@ -2168,6 +2500,11 @@ class PowerampGateway(
   private data class LibraryCoverCacheEntry(
     val base64: String,
     val hash: String
+  )
+
+  private data class LibraryCoverCandidate(
+    val realId: Long,
+    val sourcePath: String
   )
 
   private data class LibraryQueryDefinition(

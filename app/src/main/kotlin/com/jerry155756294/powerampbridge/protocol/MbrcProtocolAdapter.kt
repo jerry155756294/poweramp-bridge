@@ -396,7 +396,7 @@ class MbrcProtocolAdapter(
 
   private fun detailsPayload(state: BridgeUiState): Map<String, String> {
     val track = state.playback.track
-    return mapOf(
+    val fallback = linkedMapOf(
       "albumArtist" to track.albumArtist,
       "genre" to track.genre,
       "trackNo" to track.trackNo,
@@ -420,8 +420,17 @@ class MbrcProtocolAdapter(
       "lastPlayed" to "",
       "playCount" to "",
       "skipCount" to "",
-      "duration" to (track.durationMs / 1000L).toString()
+      "duration" to track.durationMs.takeIf { it > 0L }?.toString().orEmpty()
     )
+    // Poweramp's track broadcast carries only part of the MBRC details contract. The gateway
+    // supplements it from provider/file metadata when available; keep state values as a fallback
+    // for streams and provider versions with partial rows.
+    powerampGateway.currentTrackDetailsPayload().forEach { (key, value) ->
+      if (value.isNotBlank() || fallback[key].isNullOrBlank()) {
+        fallback[key] = value
+      }
+    }
+    return fallback
   }
 
   private fun extension(path: String): String =

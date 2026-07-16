@@ -285,9 +285,17 @@ private fun SettingsTab(
       SettingSwitch("開機後自動啟動 Bridge", settings.startOnBoot) {
         scope.launch { repository.updateStartOnBoot(it) }
       }
-      SettingSwitch("保持前景服務通知", settings.foregroundPersistent) {
+      Text(
+        "這兩個選項彼此獨立：前者在開啟 app 時啟動，後者在裝置開機後啟動，即使沒有開啟 app。",
+        style = MaterialTheme.typography.bodySmall
+      )
+      SettingSwitch("通知保持不可滑除", settings.foregroundPersistent) {
         scope.launch { repository.updateForegroundPersistent(it) }
       }
+      Text(
+        "關閉後通知會變成可滑除，但 Bridge 執行中的前景服務仍需要保留一則通知；停止 Bridge 才會完全收回通知。",
+        style = MaterialTheme.typography.bodySmall
+      )
       SettingSwitch("極簡通知診斷模式", settings.minimalForegroundNotification) {
         scope.launch { repository.updateMinimalForegroundNotification(it) }
       }
@@ -682,12 +690,24 @@ private fun PowerampDataAccessCard(
   SectionCard("Poweramp 資料存取") {
     StatusLine("狀態", statusLabel)
     Text(detail ?: summary, style = MaterialTheme.typography.bodySmall)
-    Button(
-      onClick = onRequest,
-      modifier = Modifier.fillMaxWidth(),
-      shape = MaterialTheme.shapes.large
-    ) {
-      Text(if (status == PowerampDataAccessStatus.FAILED) "重新要求資料存取權" else "要求 Poweramp 資料存取權")
+    when (status) {
+      PowerampDataAccessStatus.NOT_REQUESTED,
+      PowerampDataAccessStatus.FAILED -> {
+        Button(
+          onClick = onRequest,
+          modifier = Modifier.fillMaxWidth(),
+          shape = MaterialTheme.shapes.large
+        ) {
+          Text(if (status == PowerampDataAccessStatus.FAILED) "重新要求資料存取權" else "要求 Poweramp 資料存取權")
+        }
+      }
+      PowerampDataAccessStatus.REQUESTED -> {
+        Text(
+          "正在等待 Poweramp 確認，完成後這裡會自動更新。",
+          style = MaterialTheme.typography.bodySmall
+        )
+      }
+      PowerampDataAccessStatus.AVAILABLE -> Unit
     }
   }
 }

@@ -5,6 +5,8 @@ interface PowerampController {
   fun currentCoverPayload(): Map<String, Any?>
   /** Returns the active track's lyrics in MBRC v3+ payload form. */
   fun currentLyricsPayload(): Map<String, Any>
+  /** Returns MBRC nowplayingdetails, including tag metadata and file/statistics fields. */
+  fun currentTrackDetailsPayload(): Map<String, String> = emptyMap()
   /** The current Poweramp playback category, falling back to the manual queue when unavailable. */
   fun readNowPlayingItems(): List<PowerampQueueItem>
   fun readQueueItems(): List<PowerampQueueItem>

@@ -1,6 +1,7 @@
 package com.jerry155756294.powerampbridge.bridge
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
@@ -44,5 +45,14 @@ class BridgeNotificationPresenterTest {
     assertNotEquals(stopped, running)
     assertEquals("Bridge Running", running.title)
     assertEquals("Song - Artist", running.summary)
+  }
+
+  @Test
+  fun `disabling persistent mode makes the notification dismissible`() {
+    presenter.foregroundPersistent = false
+
+    val snapshot = presenter.snapshot(BridgeUiState(listenerActive = true))
+
+    assertFalse(snapshot.ongoing)
   }
 }

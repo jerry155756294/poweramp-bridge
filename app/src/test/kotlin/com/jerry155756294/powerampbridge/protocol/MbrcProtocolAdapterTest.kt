@@ -202,6 +202,27 @@ class MbrcProtocolAdapterTest {
   }
 
   @Test
+  fun `nowplayingdetails keeps tag metadata and statistics from the gateway`() {
+    controller.trackDetailsPayload = mapOf(
+      "trackCount" to "12",
+      "discCount" to "1",
+      "publisher" to "Label",
+      "playCount" to "15",
+      "duration" to "245000"
+    )
+
+    val data = JSONObject(
+      adapter.handleCommand(IncomingMessage(ProtocolConstants.NowPlayingDetails, null)).single()
+    ).getJSONObject("data")
+
+    assertEquals("12", data.getString("trackCount"))
+    assertEquals("1", data.getString("discCount"))
+    assertEquals("Label", data.getString("publisher"))
+    assertEquals("15", data.getString("playCount"))
+    assertEquals("245000", data.getString("duration"))
+  }
+
+  @Test
   fun `nowplayinglfmrating maps love to Poweramp like rating`() {
     val reply = adapter.handleCommand(
       IncomingMessage(ProtocolConstants.NowPlayingLfmRating, "love")
@@ -427,6 +448,7 @@ class MbrcProtocolAdapterTest {
     var coverStatus: Int = 404
     var coverPayload: Map<String, Any?> = mapOf("status" to 404, "cover" to null)
     var lyricsPayload: Map<String, Any> = mapOf("status" to 404, "lyrics" to "")
+    var trackDetailsPayload: Map<String, String> = emptyMap()
     var coverPayloadCalls = 0
     var nowPlayingItems: List<PowerampQueueItem> = emptyList()
     var queueItems: List<PowerampQueueItem> = emptyList()
@@ -449,6 +471,7 @@ class MbrcProtocolAdapterTest {
       return coverPayload
     }
     override fun currentLyricsPayload(): Map<String, Any> = lyricsPayload
+    override fun currentTrackDetailsPayload(): Map<String, String> = trackDetailsPayload
     override fun readNowPlayingItems(): List<PowerampQueueItem> = nowPlayingItems.ifEmpty { queueItems }
     override fun readQueueItems(): List<PowerampQueueItem> = queueItems
     override fun readRadioStations(): List<PowerampRadioStation> = radioStations

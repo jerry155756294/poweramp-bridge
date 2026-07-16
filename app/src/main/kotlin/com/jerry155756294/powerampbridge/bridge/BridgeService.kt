@@ -24,6 +24,8 @@ import com.jerry155756294.powerampbridge.protocol.MbrcProtocolServer
 import com.jerry155756294.powerampbridge.protocol.ProtocolClientInfo
 import com.jerry155756294.powerampbridge.protocol.ProtocolConstants
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,6 +34,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
 
 class BridgeService : Service() {
@@ -47,7 +51,11 @@ class BridgeService : Service() {
   private var positionSyncJob: Job? = null
   private var keepaliveJob: Job? = null
   private var activeSettings = BridgeSettings()
-  private var startedPort: Int? = null
+  @Volatile private var startedPort: Int? = null
+  private val lifecycleMutex = Mutex()
+  private var lifecycleGeneration = 0L
+  private var listenerStartJob: Job? = null
+  private var restartJob: Job? = null
   private var lastStatusBroadcastPayload: List<String>? = null
   private var lastBroadcastPositionMs: Long? = null
   private var lastCoverSignalTrackId: Long? = null
@@ -214,18 +222,19 @@ class BridgeService : Service() {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     when (intent?.action) {
       ACTION_STOP -> beginServiceStop(manualStop = true)
-      ACTION_RESTART -> {
-        manualStopRequested = false
-        startedPort = null
-        observeSettings()
-      }
+      ACTION_RESTART -> beginServiceRestart()
     }
     return START_STICKY
   }
 
   override fun onDestroy() {
     if (!stopCompleted) {
-      runBlocking { performStopSequence() }
+      lifecycleGeneration += 1L
+      listenerStartJob?.cancel()
+      restartJob?.cancel()
+      runBlocking {
+        lifecycleMutex.withLock { performStopSequence() }
+      }
     }
     if (::discoveryResponder.isInitialized) {
       discoveryResponder.close()
@@ -255,20 +264,102 @@ class BridgeService : Service() {
             manager.notify(NOTIFICATION_ID, notificationPresenter.build(state))
           }
         }
-        if (startedPort != settings.port) {
-          launch(Dispatchers.IO) {
-            runCatching {
-              server.start(settings.port)
-              discoveryResponder.start(settings.port)
-              startedPort = settings.port
-              app.appContainer.stateRepository.setListenerState(true, settings.port)
-              app.appContainer.stateRepository.setError(null)
-            }.onFailure { error ->
-              app.appContainer.stateRepository.setListenerState(false, settings.port)
-              app.appContainer.stateRepository.setError(error.message ?: "無法啟動監聽器")
-            }
+        if (
+          startedPort != settings.port &&
+          listenerStartJob?.isActive != true &&
+          stopJob?.isActive != true &&
+          !stopCompleted
+        ) {
+          val generation = lifecycleGeneration
+          listenerStartJob = launch(Dispatchers.IO) {
+            startListener(settings, generation)
           }
         }
+      }
+    }
+  }
+
+  private suspend fun startListener(settings: BridgeSettings, generation: Long) {
+    var serverStarted = false
+    try {
+      server.start(settings.port)
+      serverStarted = true
+      if (!isListenerStartCurrent(generation)) {
+        server.stop()
+        return
+      }
+
+      discoveryResponder.start(settings.port)
+      if (!isListenerStartCurrent(generation)) {
+        discoveryResponder.stop()
+        server.stop()
+        return
+      }
+
+      startedPort = settings.port
+      app.appContainer.stateRepository.setListenerState(true, settings.port)
+      app.appContainer.stateRepository.setError(null)
+      app.appContainer.stateRepository.recordProtocolEvent(
+        "listener_start_committed:generation=$generation port=${settings.port}"
+      )
+    } catch (error: Throwable) {
+      if (error is CancellationException) {
+        throw error
+      }
+      if (serverStarted) {
+        discoveryResponder.stop()
+        runCatching { server.stop() }
+          .onFailure { stopError -> Timber.w(stopError, "Failed to roll back listener start") }
+      }
+      if (isListenerStartCurrent(generation)) {
+        app.appContainer.stateRepository.setListenerState(false, settings.port)
+        app.appContainer.stateRepository.setError(error.message ?: "listener_start_failed")
+      }
+    }
+  }
+
+  private fun isListenerStartCurrent(generation: Long): Boolean =
+    generation == lifecycleGeneration &&
+      !stopCompleted &&
+      stopJob?.isActive != true
+
+  private fun beginServiceRestart() {
+    if (stopCompleted || stopJob?.isActive == true) {
+      app.appContainer.stateRepository.recordProtocolEvent("listener_restart_ignored_stopping")
+      return
+    }
+
+    manualStopRequested = false
+    lifecycleGeneration += 1L
+    listenerStartJob?.cancel()
+    restartJob?.cancel()
+    restartJob = scope.launch(Dispatchers.IO) {
+      lifecycleMutex.withLock {
+        if (stopCompleted || stopJob?.isActive == true) {
+          return@withLock
+        }
+
+        val generation = lifecycleGeneration
+        app.appContainer.stateRepository.recordProtocolEvent(
+          "listener_restart_begin:generation=$generation"
+        )
+        settingsJob?.cancelAndJoin()
+        listenerStartJob?.cancelAndJoin()
+        listenerStartJob = null
+        discoveryResponder.stop()
+        try {
+          server.stop()
+        } catch (error: CancellationException) {
+          throw error
+        } catch (error: Throwable) {
+          Timber.w(error, "Failed to stop protocol server before restart")
+        }
+        startedPort = null
+        app.appContainer.stateRepository.setListenerState(false, activeSettings.port)
+        observeSettings()
+        app.appContainer.stateRepository.recordProtocolEvent(
+          "listener_restart_observing:generation=$generation"
+        )
       }
     }
   }
@@ -506,8 +597,13 @@ class BridgeService : Service() {
       return
     }
 
+    // Invalidate any listener start that may still be waiting on the provider. The stop job is
+    // serialized with restart below, so a cancelled restart cannot resurrect the listener.
+    lifecycleGeneration += 1L
+    listenerStartJob?.cancel()
+    restartJob?.cancel()
     stopJob = scope.launch {
-      performStopSequence()
+      lifecycleMutex.withLock { performStopSequence() }
       stopSelf()
     }
   }
@@ -518,11 +614,14 @@ class BridgeService : Service() {
     }
 
     stopCompleted = true
+    lifecycleGeneration += 1L
     if (::app.isInitialized) {
       app.appContainer.stateRepository.markServiceStopping(manualStopRequested)
     }
-    settingsJob?.cancel()
-    stateJob?.cancel()
+    settingsJob?.cancelAndJoin()
+    stateJob?.cancelAndJoin()
+    listenerStartJob?.cancelAndJoin()
+    listenerStartJob = null
     latencyTimeoutJob?.cancel()
     commandAckJob?.cancel()
     if (::app.isInitialized) {
@@ -560,6 +659,10 @@ class BridgeService : Service() {
     }
 
     ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+    // Be explicit as well: some Android builds keep the old notification row until the manager
+    // is notified after the foreground record is removed.
+    (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+      .cancel(NOTIFICATION_ID)
   }
 
   private fun recordLatencyMeasurement(
