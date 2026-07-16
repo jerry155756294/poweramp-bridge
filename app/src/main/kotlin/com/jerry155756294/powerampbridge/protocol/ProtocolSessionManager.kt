@@ -60,12 +60,14 @@ data class ProtocolEngineResult(
   val sessionSnapshot: LogicalClientSnapshot? = null,
   val probeAddress: String? = null,
   val rejectionReason: String? = null,
-  val sendInitialSnapshot: Boolean = false
+  val sendInitialSnapshot: Boolean = false,
+  val protocolEvents: List<String> = emptyList()
 )
 
 data class ProtocolDisconnectResult(
   val sessionChanged: Boolean,
-  val sessionSnapshot: LogicalClientSnapshot?
+  val sessionSnapshot: LogicalClientSnapshot?,
+  val protocolEvents: List<String> = emptyList()
 )
 
 class ProtocolSessionManager(
@@ -115,13 +117,20 @@ class ProtocolSessionManager(
     val currentSession = logicalClient ?: return ProtocolDisconnectResult(false, null)
 
     var changed = false
+    val protocolEvents = mutableListOf<String>()
     var updatedSession = currentSession
 
-    if (currentSession.broadcastSocketId == connection.socketId) {
+    if (currentSession.activeBroadcastSocketId == connection.socketId) {
       updatedSession = updatedSession.copy(
-        broadcastSocketId = null,
+        activeBroadcastSocketId = null,
         broadcastInitialized = false
       )
+      changed = true
+    }
+
+    if (currentSession.pendingBroadcastSocketId == connection.socketId) {
+      updatedSession = updatedSession.copy(pendingBroadcastSocketId = null)
+      protocolEvents += "pending_broadcast_closed"
       changed = true
     }
 
@@ -133,7 +142,8 @@ class ProtocolSessionManager(
     }
 
     logicalClient = if (
-      updatedSession.broadcastSocketId == null &&
+      updatedSession.activeBroadcastSocketId == null &&
+      updatedSession.pendingBroadcastSocketId == null &&
       updatedSession.requestSocketIds.isEmpty()
     ) {
       null
@@ -143,13 +153,23 @@ class ProtocolSessionManager(
 
     return ProtocolDisconnectResult(
       sessionChanged = changed,
-      sessionSnapshot = logicalClient?.toSnapshot()
+      sessionSnapshot = logicalClient?.toSnapshot(),
+      protocolEvents = protocolEvents
     )
   }
 
   fun broadcastSocketId(): String? = logicalClient
-    ?.takeIf { it.broadcastSocketId != null && it.broadcastInitialized }
-    ?.broadcastSocketId
+    ?.takeIf { it.activeBroadcastSocketId != null && it.broadcastInitialized }
+    ?.activeBroadcastSocketId
+
+  fun handshakeTimeoutCategory(socketId: String): String? = when (
+    connections[socketId]?.handshakeState
+  ) {
+    HandshakeState.AWAITING_PLAYER -> "handshake_timeout_before_player"
+    HandshakeState.AWAITING_PROTOCOL -> "handshake_timeout_before_protocol"
+    HandshakeState.AWAITING_INIT -> "handshake_timeout_before_init"
+    HandshakeState.READY, null -> null
+  }
 
   fun connectionDebugSnapshot(socketId: String): ConnectionDebugSnapshot? {
     val connection = connections[socketId] ?: return null
@@ -225,7 +245,12 @@ class ProtocolSessionManager(
       replies = listOf(OutgoingMessage(ProtocolConstants.Protocol, serverProtocolVersion)),
       socketsToClose = attach.replacedSocketIds,
       sessionChanged = true,
-      sessionSnapshot = logicalClient?.toSnapshot()
+      sessionSnapshot = logicalClient?.toSnapshot(),
+      protocolEvents = if (attach.clientInfo.role == SocketRole.BROADCAST) {
+        listOf("pending_broadcast_created")
+      } else {
+        emptyList()
+      }
     )
   }
 
@@ -234,24 +259,45 @@ class ProtocolSessionManager(
     message: IncomingMessage
   ): ProtocolEngineResult {
     if (message.context != ProtocolConstants.Init) {
+      if (logicalClient?.pendingBroadcastSocketId == connection.socketId) {
+        return ProtocolEngineResult(
+          delegateMessage = message,
+          clientInfo = connection.toClientInfo(),
+          protocolEvents = listOf("pre_init_command_accepted")
+        )
+      }
       return ProtocolEngineResult(disconnect = true, disconnectCategory = "protocol_violation_before_init")
     }
 
-    // A same-client reconnect replaces the broadcast socket before the old socket is closed.
-    // Do not let a delayed init from that old socket mark the replacement as ready or receive
-    // the initial snapshot intended for the new connection.
-    if (logicalClient?.broadcastSocketId != connection.socketId) {
+    // A reconnect remains pending until init. This keeps a healthy active broadcast socket
+    // available for state traffic while the new socket finishes its handshake.
+    if (logicalClient?.pendingBroadcastSocketId != connection.socketId) {
       return ProtocolEngineResult(disconnect = true, disconnectCategory = "stale_broadcast_init")
     }
 
+    val previousActiveSocketId = logicalClient?.activeBroadcastSocketId
     connection.handshakeState = HandshakeState.READY
-    logicalClient = logicalClient?.copy(broadcastInitialized = true)
+    logicalClient = logicalClient?.copy(
+      activeBroadcastSocketId = connection.socketId,
+      pendingBroadcastSocketId = null,
+      broadcastInitialized = true
+    )
 
     return ProtocolEngineResult(
       clientInfo = connection.toClientInfo(),
+      socketsToClose = previousActiveSocketId
+        ?.takeIf { it != connection.socketId }
+        ?.let(::setOf)
+        ?: emptySet(),
       sessionChanged = true,
       sessionSnapshot = logicalClient?.toSnapshot(),
-      sendInitialSnapshot = true
+      sendInitialSnapshot = true,
+      protocolEvents = buildList {
+        add("pending_broadcast_promoted")
+        if (previousActiveSocketId != null && previousActiveSocketId != connection.socketId) {
+          add("active_broadcast_replaced")
+        }
+      }
     )
   }
 
@@ -279,7 +325,8 @@ class ProtocolSessionManager(
         remoteAddress = connection.remoteAddress,
         clientId = requestedClientId,
         protocolVersion = handshake.protocolVersion,
-        broadcastSocketId = if (role == SocketRole.BROADCAST) connection.socketId else null,
+        activeBroadcastSocketId = null,
+        pendingBroadcastSocketId = if (role == SocketRole.BROADCAST) connection.socketId else null,
         requestSocketIds = if (role == SocketRole.REQUEST) setOf(connection.socketId) else emptySet(),
         broadcastInitialized = false
       )
@@ -301,21 +348,25 @@ class ProtocolSessionManager(
     val replacedSocketIds = mutableSetOf<String>()
     if (
       role == SocketRole.BROADCAST &&
-      currentSession.broadcastSocketId != null &&
-      currentSession.broadcastSocketId != connection.socketId
+      currentSession.pendingBroadcastSocketId != null &&
+      currentSession.pendingBroadcastSocketId != connection.socketId
     ) {
-      replacedSocketIds += currentSession.broadcastSocketId
+      replacedSocketIds += currentSession.pendingBroadcastSocketId
     }
     logicalClient = currentSession.copy(
       clientId = effectiveClientId,
       protocolVersion = handshake.protocolVersion,
-      broadcastSocketId = if (role == SocketRole.BROADCAST) connection.socketId else currentSession.broadcastSocketId,
+      pendingBroadcastSocketId = if (role == SocketRole.BROADCAST) {
+        connection.socketId
+      } else {
+        currentSession.pendingBroadcastSocketId
+      },
       requestSocketIds = if (role == SocketRole.REQUEST) {
         currentSession.requestSocketIds + connection.socketId
       } else {
         currentSession.requestSocketIds
       },
-      broadcastInitialized = if (role == SocketRole.BROADCAST) false else currentSession.broadcastInitialized
+      broadcastInitialized = currentSession.broadcastInitialized
     )
 
     return AttachResult(
@@ -411,7 +462,8 @@ class ProtocolSessionManager(
     val remoteAddress: String,
     val clientId: String?,
     val protocolVersion: Int?,
-    val broadcastSocketId: String?,
+    val activeBroadcastSocketId: String?,
+    val pendingBroadcastSocketId: String?,
     val requestSocketIds: Set<String>,
     val broadcastInitialized: Boolean
   ) {
@@ -419,7 +471,7 @@ class ProtocolSessionManager(
       remoteAddress = remoteAddress,
       clientId = clientId,
       protocolVersion = protocolVersion,
-      broadcastSocketConnected = broadcastSocketId != null,
+      broadcastSocketConnected = activeBroadcastSocketId != null || pendingBroadcastSocketId != null,
       broadcastInitialized = broadcastInitialized,
       requestSocketCount = requestSocketIds.size,
       requestSocketConnected = requestSocketIds.isNotEmpty()

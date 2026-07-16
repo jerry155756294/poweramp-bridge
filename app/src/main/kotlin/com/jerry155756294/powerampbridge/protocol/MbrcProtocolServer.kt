@@ -8,6 +8,7 @@ import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,8 +23,13 @@ import timber.log.Timber
 
 class MbrcProtocolServer(
   private val codec: JsonMessageCodec,
-  private val listener: Listener
+  private val listener: Listener,
+  private val handshakeTimeoutMs: Int = HANDSHAKE_TIMEOUT_MS
 ) {
+  companion object {
+    private const val HANDSHAKE_TIMEOUT_MS = 10_000
+  }
+
   interface Listener {
     suspend fun onCommand(clientInfo: ProtocolClientInfo, message: IncomingMessage): List<String>
     suspend fun onBroadcastReady(clientInfo: ProtocolClientInfo): List<String>
@@ -57,6 +63,7 @@ class MbrcProtocolServer(
         } ?: break
         socket.keepAlive = true
         socket.tcpNoDelay = true
+        socket.soTimeout = handshakeTimeoutMs
 
         val socketId = UUID.randomUUID().toString()
         val remoteAddress = socket.inetAddress?.hostAddress.orEmpty()
@@ -153,6 +160,9 @@ class MbrcProtocolServer(
         if (result.sessionChanged) {
           listener.onSessionChanged(result.sessionSnapshot)
         }
+        result.protocolEvents.forEach { event ->
+          listener.onProtocolEvent("$event:${shortSocketId(socketId)}")
+        }
         result.probeAddress?.let { listener.onProbe(it) }
         result.rejectionReason?.let { reason ->
           mutex.withLock { protocolManager.connectionDebugSnapshot(socketId) }?.let { snapshot ->
@@ -174,8 +184,15 @@ class MbrcProtocolServer(
           sendEncodedReplies(socketId, session, replies)
         }
 
+        applyReadTimeout(socketId, session)
         if (result.disconnect) break
       }
+    } catch (error: SocketTimeoutException) {
+      closeReason = mutex.withLock {
+        protocolManager.handshakeTimeoutCategory(socketId) ?: "socket_read_error:${error.javaClass.simpleName}"
+      }
+      mutex.withLock { protocolManager.markDisconnectCategory(socketId, closeReason) }
+      listener.onProtocolEvent("$closeReason:${shortSocketId(socketId)}")
     } catch (error: Exception) {
       closeReason = "socket_read_error:${error.javaClass.simpleName}"
       mutex.withLock { protocolManager.markDisconnectCategory(socketId, closeReason) }
@@ -218,6 +235,9 @@ class MbrcProtocolServer(
       listener.onProtocolEvent(
         "socket_closed:${shortSocketId(socketId)}:${connectionSnapshot?.disconnectCategory ?: "peer_closed_unknown"}"
       )
+      disconnectResult.protocolEvents.forEach { event ->
+        listener.onProtocolEvent("$event:${shortSocketId(socketId)}")
+      }
       if (disconnectResult.sessionChanged) {
         listener.onSessionChanged(disconnectResult.sessionSnapshot)
       }
@@ -288,7 +308,19 @@ class MbrcProtocolServer(
   }
 
   private suspend fun isBroadcastSocket(socketId: String): Boolean =
-    mutex.withLock { protocolManager.connectionDebugSnapshot(socketId)?.role == SocketRole.BROADCAST }
+    mutex.withLock { protocolManager.broadcastSocketId() == socketId }
+
+  private suspend fun applyReadTimeout(socketId: String, session: ClientSession) {
+    val snapshot = mutex.withLock { protocolManager.connectionDebugSnapshot(socketId) } ?: return
+    val timeoutMs = if (
+      snapshot.handshakeState == HandshakeState.READY || snapshot.role == SocketRole.PROBE
+    ) {
+      0
+    } else {
+      handshakeTimeoutMs
+    }
+    session.setReadTimeout(timeoutMs)
+  }
 
   private fun shortSocketId(socketId: String): String = socketId.take(8)
 
@@ -313,6 +345,10 @@ class MbrcProtocolServer(
       runCatching { rawSocket.close() }
       runCatching { reader.close() }
       runCatching { writer.close() }
+    }
+
+    fun setReadTimeout(timeoutMs: Int) {
+      rawSocket.soTimeout = timeoutMs
     }
   }
 }

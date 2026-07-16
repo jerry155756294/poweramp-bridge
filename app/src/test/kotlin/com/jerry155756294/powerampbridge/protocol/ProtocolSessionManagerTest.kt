@@ -280,7 +280,7 @@ class ProtocolSessionManagerTest {
   }
 
   @Test
-  fun `same client can replace stale broadcast socket immediately`() {
+  fun `same client keeps active broadcast until pending broadcast initializes`() {
     manager.registerConnection("broadcast-old", "10.0.0.2")
     manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Player, "Android"))
     manager.processMessage(
@@ -303,16 +303,19 @@ class ProtocolSessionManagerTest {
     )
 
     assertFalse(replacement.disconnect)
-    assertEquals(setOf("broadcast-old"), replacement.socketsToClose)
+    assertTrue(replacement.socketsToClose.isEmpty())
     assertTrue(replacement.sessionChanged)
     assertTrue(replacement.sessionSnapshot?.broadcastSocketConnected == true)
-    assertFalse(replacement.sessionSnapshot?.broadcastInitialized == true)
-    assertEquals(
-      "broadcast_replaced_by_same_client",
-      manager.apply {
-        markDisconnectCategory("broadcast-old", "broadcast_replaced_by_same_client")
-      }.inferCloseCategory("broadcast-old")
-    )
+    assertTrue(replacement.sessionSnapshot?.broadcastInitialized == true)
+    assertEquals("broadcast-old", manager.broadcastSocketId())
+    assertTrue(replacement.protocolEvents.contains("pending_broadcast_created"))
+
+    val promoted = manager.processMessage("broadcast-new", IncomingMessage(ProtocolConstants.Init, null))
+
+    assertEquals(setOf("broadcast-old"), promoted.socketsToClose)
+    assertEquals("broadcast-new", manager.broadcastSocketId())
+    assertTrue(promoted.protocolEvents.contains("pending_broadcast_promoted"))
+    assertTrue(promoted.protocolEvents.contains("active_broadcast_replaced"))
   }
 
   @Test
@@ -383,10 +386,14 @@ class ProtocolSessionManagerTest {
       )
     )
 
-    assertEquals(setOf("broadcast-old"), replacement.socketsToClose)
+    assertTrue(replacement.socketsToClose.isEmpty())
     assertEquals(1, replacement.sessionSnapshot?.requestSocketCount)
     assertTrue(replacement.sessionSnapshot?.requestSocketConnected == true)
-    assertFalse(replacement.sessionSnapshot?.broadcastInitialized == true)
+    assertTrue(replacement.sessionSnapshot?.broadcastInitialized == true)
+
+    val promoted = manager.processMessage("broadcast-new", IncomingMessage(ProtocolConstants.Init, null))
+    assertEquals(setOf("broadcast-old"), promoted.socketsToClose)
+    assertEquals(1, promoted.sessionSnapshot?.requestSocketCount)
   }
 
   @Test
@@ -405,7 +412,7 @@ class ProtocolSessionManagerTest {
   }
 
   @Test
-  fun `broadcast socket rejects commands before init`() {
+  fun `pending broadcast accepts a queued command before init`() {
     manager.registerConnection("broadcast", "10.0.0.2")
     manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Player, "Android"))
     manager.processMessage(
@@ -421,12 +428,69 @@ class ProtocolSessionManagerTest {
       IncomingMessage(ProtocolConstants.PlayerStatus, null)
     )
 
-    assertTrue(prematureCommand.disconnect)
-    assertNull(prematureCommand.delegateMessage)
+    assertFalse(prematureCommand.disconnect)
+    assertEquals(ProtocolConstants.PlayerStatus, prematureCommand.delegateMessage?.context)
+    assertEquals(SocketRole.BROADCAST, prematureCommand.clientInfo?.role)
+    assertTrue(prematureCommand.protocolEvents.contains("pre_init_command_accepted"))
     assertEquals(
-      "protocol_violation_before_init",
-      prematureCommand.disconnectCategory
+      HandshakeState.AWAITING_INIT,
+      manager.connectionDebugSnapshot("broadcast")?.handshakeState
     )
+
+    val initResult = manager.processMessage("broadcast", IncomingMessage(ProtocolConstants.Init, null))
+    assertTrue(initResult.sendInitialSnapshot)
+    assertEquals("broadcast", manager.broadcastSocketId())
+  }
+
+  @Test
+  fun `pending broadcast close does not clear healthy active broadcast`() {
+    manager.registerConnection("broadcast-old", "10.0.0.2")
+    manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast-old",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+    manager.processMessage("broadcast-old", IncomingMessage(ProtocolConstants.Init, null))
+
+    manager.registerConnection("broadcast-pending", "10.0.0.2")
+    manager.processMessage("broadcast-pending", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "broadcast-pending",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-1")
+      )
+    )
+
+    val disconnected = manager.disconnect("broadcast-pending")
+
+    assertEquals("broadcast-old", manager.broadcastSocketId())
+    assertTrue(disconnected.sessionSnapshot?.broadcastInitialized == true)
+    assertTrue(disconnected.protocolEvents.contains("pending_broadcast_closed"))
+  }
+
+  @Test
+  fun `handshake timeout categories identify each incomplete phase`() {
+    manager.registerConnection("before-player", "10.0.0.2")
+    assertEquals("handshake_timeout_before_player", manager.handshakeTimeoutCategory("before-player"))
+
+    manager.registerConnection("before-protocol", "10.0.0.3")
+    manager.processMessage("before-protocol", IncomingMessage(ProtocolConstants.Player, "Android"))
+    assertEquals("handshake_timeout_before_protocol", manager.handshakeTimeoutCategory("before-protocol"))
+
+    manager.registerConnection("before-init", "10.0.0.4")
+    manager.processMessage("before-init", IncomingMessage(ProtocolConstants.Player, "Android"))
+    manager.processMessage(
+      "before-init",
+      IncomingMessage(
+        ProtocolConstants.Protocol,
+        mapOf("protocol_version" to 4, "no_broadcast" to false, "client_id" to "sender-timeout")
+      )
+    )
+    assertEquals("handshake_timeout_before_init", manager.handshakeTimeoutCategory("before-init"))
   }
 
   @Test
