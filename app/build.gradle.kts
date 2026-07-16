@@ -14,6 +14,27 @@ val releaseSigningConfigured = listOf(
   releaseKeyAlias,
   releaseKeyPassword
 ).all { !it.isNullOrBlank() }
+val appVersionCode = providers.gradleProperty("appVersionCode")
+  .orNull
+  ?.toIntOrNull()
+  ?: 3
+val appVersionName = providers.gradleProperty("appVersionName")
+  .orNull
+  ?: "0.1.2"
+val releaseTaskRequested = gradle.startParameter.taskNames.any { taskName ->
+  taskName.substringAfterLast(':').contains("Release", ignoreCase = true)
+}
+
+check(appVersionCode > 0) { "appVersionCode must be a positive integer" }
+check(!releaseTaskRequested || releaseSigningConfigured) {
+  "Release builds require ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, " +
+    "ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD"
+}
+if (releaseSigningConfigured) {
+  check(file(releaseKeystorePath!!).isFile) {
+    "Configured release keystore does not exist: $releaseKeystorePath"
+  }
+}
 
 android {
   namespace = "com.jerry155756294.powerampbridge"
@@ -23,8 +44,8 @@ android {
     applicationId = "com.jerry155756294.powerampbridge"
     minSdk = 26
     targetSdk = 36
-    versionCode = 3
-    versionName = "0.1.2"
+    versionCode = appVersionCode
+    versionName = appVersionName
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -38,6 +59,7 @@ android {
         keyPassword = releaseKeyPassword
         enableV1Signing = true
         enableV2Signing = true
+        enableV3Signing = true
       }
     }
   }

@@ -31,10 +31,14 @@ Recommended test setups:
 
 ## Build
 
-The repository includes a GitHub Actions workflow that builds a debug APK artifact on pushes and pull requests.
+GitHub Actions runs debug compilation and unit tests for every change. Pushes and manual Actions runs additionally build a release-signed APK and AAB using the repository's permanent keystore; pull requests only expose a debug APK for validation. These workflows upload artifacts only and do not publish GitHub Releases.
 
 - Workflow: `.github/workflows/android-ci.yml`
-- Artifact: `poweramp-bridge-debug-apk`
+- Distribution APK artifact: `poweramp-bridge-release-apk`
+- Google Play bundle artifact: `poweramp-bridge-release-aab`
+- Pull-request validation artifact: `poweramp-bridge-pr-debug-apk`
+
+Use the release APK for installation and updates. Do not use the pull-request debug APK as a release update; its CI debug certificate is intentionally not stable.
 
 For local builds:
 
