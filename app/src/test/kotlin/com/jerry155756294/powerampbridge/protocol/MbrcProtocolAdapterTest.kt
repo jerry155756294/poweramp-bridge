@@ -179,15 +179,21 @@ class MbrcProtocolAdapterTest {
   }
 
   @Test
-  fun `library cover is delegated with its hash request`() {
+  fun `library cover is delegated with its identity and hash request`() {
     controller.libraryCoverPayload = mapOf("status" to 304, "cover" to null, "hash" to "same")
 
     val data = JSONObject(
-      adapter.handleCommand(IncomingMessage(ProtocolConstants.LibraryCover, mapOf("artist" to "A", "album" to "B", "hash" to "same"))).single()
+      adapter.handleCommand(
+        IncomingMessage(
+          ProtocolConstants.LibraryCover,
+          mapOf("artist" to "A", "album" to "B", "real_id" to "42", "hash" to "same")
+        )
+      ).single()
     ).getJSONObject("data")
 
     assertEquals(304, data.getInt("status"))
     assertEquals("same", data.getString("hash"))
+    assertEquals("42", controller.libraryCoverRequest?.get("real_id"))
   }
 
   @Test
@@ -457,6 +463,7 @@ class MbrcProtocolAdapterTest {
     var playlistPage: PowerampPlaylistPage = PowerampPlaylistPage(0, 0, 800, emptyList())
     var libraryNavigation: Map<String, List<Map<String, Any?>>> = emptyMap()
     var libraryCoverPayload: Map<String, Any?> = mapOf("status" to 404, "cover" to null)
+    var libraryCoverRequest: Map<*, *>? = null
     var queueCommandResult: QueueCommandResult = QueueCommandResult(200, true, "ok")
     var lastQueueCommandType: String? = null
     var lastQueueCommandPaths: List<String>? = null
@@ -480,7 +487,10 @@ class MbrcProtocolAdapterTest {
     override fun readPlaylistPage(offset: Int, limit: Int): PowerampPlaylistPage = playlistPage
     override fun readLibraryNavigation(context: String, query: String): List<Map<String, Any?>> =
       libraryNavigation[context].orEmpty()
-    override fun readLibraryCover(request: Map<*, *>?): Map<String, Any?> = libraryCoverPayload
+    override fun readLibraryCover(request: Map<*, *>?): Map<String, Any?> {
+      libraryCoverRequest = request
+      return libraryCoverPayload
+    }
 
     override fun playPause(): Boolean = true
     override fun play(): Boolean = true

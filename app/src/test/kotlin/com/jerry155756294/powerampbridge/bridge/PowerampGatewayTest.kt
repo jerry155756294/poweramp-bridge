@@ -97,6 +97,9 @@ class PowerampGatewayTest {
     assertEquals("Album", payload["album"])
     assertEquals("2024", payload["year"])
     assertEquals("Jazz", payload["genre"])
+    assertEquals("42", payload["real_id"])
+    assertEquals("0", payload["album_id"])
+    assertTrue((payload["library_source_id"] as? String).orEmpty().isNotBlank())
   }
 
   @Test

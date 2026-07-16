@@ -27,6 +27,7 @@ import java.text.SimpleDateFormat
 import java.util.concurrent.ConcurrentHashMap
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -50,8 +51,10 @@ class PowerampGateway(
   private var audioDeviceRefreshJob: Job? = null
   private var coverLoadGeneration: Long = 0L
   private val negativeCoverCache = ConcurrentHashMap<Long, NegativeCoverCacheEntry>()
-  private val libraryCoverCache = ConcurrentHashMap<String, LibraryCoverCacheEntry>()
+  private val libraryCoverCache = ConcurrentHashMap<String, LibraryCoverResolution>()
+  private val encodedLibraryCoverCache = ConcurrentHashMap<String, LibraryCoverCacheEntry>()
   private val missingLibraryCoverCache = ConcurrentHashMap<String, Long>()
+  private val libraryCoverLoadLocks = ConcurrentHashMap<String, Any>()
   private val libraryAlbumArtistCache = ConcurrentHashMap<Long, String>()
   private val libraryAlbumArtistIdCache = ConcurrentHashMap<Long, String>()
   private val libraryGenreCache = ConcurrentHashMap<Long, String>()
@@ -62,6 +65,13 @@ class PowerampGateway(
   private var activePlaybackCategory: ActivePlaybackCategory? = null
   @Volatile
   private var pendingSeekPositionMs: Long? = null
+  private val librarySourceId: String by lazy {
+    val preferences = context.getSharedPreferences(LIBRARY_IDENTITY_PREFERENCES, Context.MODE_PRIVATE)
+    preferences.getString(LIBRARY_SOURCE_ID_KEY, null)
+      ?: UUID.randomUUID().toString().also { sourceId ->
+        preferences.edit().putString(LIBRARY_SOURCE_ID_KEY, sourceId).apply()
+      }
+  }
 
   private val receiver = object : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -522,41 +532,100 @@ class PowerampGateway(
   override fun readLibraryCover(request: Map<*, *>?): Map<String, Any?> {
     val artist = request?.get("artist") as? String ?: ""
     val album = request?.get("album") as? String ?: ""
-    if (album.isBlank()) return mapOf("status" to 400, "cover" to null)
+    val requestedRealId = (request?.get("real_id") ?: request?.get("realId")).asPositiveLongOrNull()
+    val requestedSourceId = (request?.get("library_source_id") ?: request?.get("librarySourceId")) as? String
+    if (album.isBlank() && requestedRealId == null) return mapOf("status" to 400, "cover" to null)
     if (!refreshAvailability()) return mapOf("status" to 503, "cover" to null)
+    if (requestedRealId != null && !requestedSourceId.isNullOrBlank() && requestedSourceId != librarySourceId) {
+      stateRepository.recordPowerampEvent(
+        "Library track cover missing: source_mismatch requested_source=$requestedSourceId real_id=$requestedRealId"
+      )
+      return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
+    }
     val size = ((request?.get("size") as? Number)?.toInt() ?: (request?.get("size") as? String)?.toIntOrNull() ?: DEFAULT_LIBRARY_COVER_SIZE)
       .coerceIn(MIN_LIBRARY_COVER_SIZE, MAX_LIBRARY_COVER_SIZE)
     val requestHash = request?.get("hash") as? String
-    val albumKey = "$artist\u0000$album"
+    return if (requestedRealId != null) {
+      readTrackLibraryCover(artist, album, requestedRealId, size, requestHash)
+    } else {
+      readLegacyLibraryCover(artist, album, size, requestHash)
+    }
+  }
+
+  private fun readTrackLibraryCover(
+    artist: String,
+    album: String,
+    realId: Long,
+    size: Int,
+    requestHash: String?
+  ): Map<String, Any?> {
+    val candidate = findLibraryCoverCandidateByRealId(realId)
+      ?: return libraryCoverNotFound(artist, album, "track:$librarySourceId:$realId:$size", "missing_track")
+    val fingerprint = libraryCoverFingerprint(candidate.sourcePath)
+    val cacheKey = "track:$librarySourceId:$realId:$fingerprint:$size"
+    val missingUntil = missingLibraryCoverCache[cacheKey]
+    if (missingUntil != null && missingUntil > SystemClock.elapsedRealtime()) {
+      return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
+    }
+    var cacheHit = false
+    val loaded = withLibraryCoverLock(cacheKey) {
+      libraryCoverCache[cacheKey]?.also { cacheHit = true }
+        ?: loadTrackLibraryCover(candidate, size)?.also { libraryCoverCache[cacheKey] = it }
+    } ?: return libraryCoverNotFound(artist, album, cacheKey, "track_missing")
+    missingLibraryCoverCache.remove(cacheKey)
+    stateRepository.recordPowerampEvent(
+      "Library track cover ready: source=$librarySourceId real_id=$realId path=${candidate.sourcePath} " +
+        "fingerprint=$fingerprint read=${loaded.readMethod} output=${loaded.entry.width}x${loaded.entry.height} " +
+        "size=$size cache_hit=$cacheHit hash=${loaded.entry.hash}"
+    )
+    if (requestHash == loaded.entry.hash) {
+      stateRepository.recordPowerampEvent("Library track cover result: real_id=$realId status=304")
+      return mapOf("status" to 304, "artist" to artist, "album" to album, "cover" to null, "hash" to loaded.entry.hash)
+    }
+    return mapOf("status" to 200, "artist" to artist, "album" to album, "cover" to loaded.entry.base64, "hash" to loaded.entry.hash)
+  }
+
+  private fun readLegacyLibraryCover(
+    artist: String,
+    album: String,
+    size: Int,
+    requestHash: String?
+  ): Map<String, Any?> {
+    val albumKey = "legacy:${artist.trim().lowercase(Locale.ROOT)}\u0000${album.trim().lowercase(Locale.ROOT)}\u0000$size"
     val missingUntil = missingLibraryCoverCache[albumKey]
     if (missingUntil != null && missingUntil > SystemClock.elapsedRealtime()) {
       return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
     }
     val candidates = findLibraryCoverCandidates(artist, album)
-    if (candidates.isEmpty()) {
-      missingLibraryCoverCache[albumKey] = SystemClock.elapsedRealtime() + NEGATIVE_COVER_CACHE_MS
-      return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
-    }
+    if (candidates.isEmpty()) return libraryCoverNotFound(artist, album, albumKey, "legacy_no_candidates")
 
     val loaded = candidates.firstNotNullOfOrNull { candidate ->
-      val cacheKey = "$albumKey\u0000${candidate.realId}\u0000$size"
-      val cached = libraryCoverCache[cacheKey]
-        ?: loadLibraryCover(candidate, size)?.also { libraryCoverCache[cacheKey] = it }
-      cached?.let { candidate.realId to it }
-    } ?: run {
-      missingLibraryCoverCache[albumKey] = SystemClock.elapsedRealtime() + NEGATIVE_COVER_CACHE_MS
-      return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
-    }
-    val realId = loaded.first
-    val cached = loaded.second
+      val cacheKey = "$albumKey\u0000${candidate.realId}\u0000${libraryCoverFingerprint(candidate.sourcePath)}"
+      withLibraryCoverLock(cacheKey) {
+        libraryCoverCache[cacheKey]
+          ?: loadLegacyLibraryCover(candidate, size)?.also { libraryCoverCache[cacheKey] = it }
+      }
+    } ?: return libraryCoverNotFound(artist, album, albumKey, "legacy_missing")
     missingLibraryCoverCache.remove(albumKey)
     stateRepository.recordPowerampEvent(
-      "Library cover loaded: artist=$artist album=$album real_id=$realId candidates=${candidates.size}"
+      "Library legacy cover ready: artist=$artist album=$album candidates=${candidates.size} " +
+        "read=${loaded.readMethod} output=${loaded.entry.width}x${loaded.entry.height} size=$size hash=${loaded.entry.hash}"
     )
-    if (requestHash == cached.hash) {
-      return mapOf("status" to 304, "artist" to artist, "album" to album, "cover" to null, "hash" to cached.hash)
+    if (requestHash == loaded.entry.hash) {
+      return mapOf("status" to 304, "artist" to artist, "album" to album, "cover" to null, "hash" to loaded.entry.hash)
     }
-    return mapOf("status" to 200, "artist" to artist, "album" to album, "cover" to cached.base64, "hash" to cached.hash)
+    return mapOf("status" to 200, "artist" to artist, "album" to album, "cover" to loaded.entry.base64, "hash" to loaded.entry.hash)
+  }
+
+  private fun libraryCoverNotFound(
+    artist: String,
+    album: String,
+    cacheKey: String,
+    detail: String
+  ): Map<String, Any?> {
+    missingLibraryCoverCache[cacheKey] = SystemClock.elapsedRealtime() + NEGATIVE_COVER_CACHE_MS
+    stateRepository.recordPowerampEvent("Library cover missing: $detail key=$cacheKey")
+    return mapOf("status" to 404, "artist" to artist, "album" to album, "cover" to null)
   }
 
   override fun readLibraryNavigation(context: String, query: String): List<Map<String, Any?>> {
@@ -630,7 +699,9 @@ class PowerampGateway(
         // ad-hoc joins here: several Poweramp versions reject them with SQLiteException.
         "album" to cursor.stringOrBlank("album"),
         "artist" to firstArtistForAlbum(albumId),
-        "count" to countTracksForAlbum(albumId)
+        "count" to countTracksForAlbum(albumId),
+        "album_id" to albumId.toString(),
+        "library_source_id" to librarySourceId
       )
     }
     "browsetracks" -> LibraryQueryDefinition(
@@ -658,7 +729,7 @@ class PowerampGateway(
       ),
       "${TableDefs.Albums.ALBUM}=?",
       arrayOf(album),
-      "${TableDefs.Files._ID} ASC"
+      "${TableDefs.Files.DISC} ASC, ${TableDefs.Files.TRACK_TAG} ASC, ${TableDefs.Files._ID} ASC"
     )?.use { cursor ->
       val matched = mutableListOf<LibraryCoverCandidate>()
       val fallback = mutableListOf<LibraryCoverCandidate>()
@@ -684,6 +755,25 @@ class PowerampGateway(
       (matched + fallback).distinctBy(LibraryCoverCandidate::realId)
     } ?: emptyList()
   }.getOrDefault(emptyList())
+
+  private fun findLibraryCoverCandidateByRealId(realId: Long): LibraryCoverCandidate? = runCatching {
+    val uri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("files").build()
+    context.contentResolver.query(
+      uri,
+      arrayOf(
+        "${TableDefs.Files._ID} AS real_id",
+        "${TableDefs.Files.FULL_PATH} AS track_path",
+        "${TableDefs.Files.URL} AS track_url"
+      ),
+      "${TableDefs.Files._ID}=?",
+      arrayOf(realId.toString()),
+      null
+    )?.use { cursor ->
+      if (!cursor.moveToFirst()) return@use null
+      val foundId = cursor.longOrNull("real_id") ?: return@use null
+      LibraryCoverCandidate(foundId, cursor.firstNonBlank("track_path", "track_url"))
+    }
+  }.getOrNull()
 
   private fun firstArtistForAlbum(albumId: Long): String {
     if (albumId <= 0L) return ""
@@ -846,6 +936,9 @@ class PowerampGateway(
     val artist = cursor.stringOrBlank("artist")
     return linkedMapOf(
       "src" to cursor.stringOrBlank("src"),
+      "real_id" to fileId.toString(),
+      "album_id" to albumId.toString(),
+      "library_source_id" to librarySourceId,
       "artist" to artist,
       "title" to cursor.stringOrBlank("title"),
       "trackno" to (cursor.longOrNull("trackno") ?: 0L).toInt(),
@@ -923,10 +1016,30 @@ class PowerampGateway(
     )
   }
 
-  private fun loadLibraryCover(
+  private fun loadTrackLibraryCover(
     candidate: LibraryCoverCandidate,
     size: Int
-  ): LibraryCoverCacheEntry? {
+  ): LibraryCoverResolution? {
+    // Poweramp may return one album-level image for multiple file IDs. Track rows must instead
+    // prefer the artwork physically embedded in this exact file before falling back to that API.
+    val embedded = loadEmbeddedTrackCover(candidate.sourcePath, size)
+    if (embedded != null) {
+      return LibraryCoverResolution(libraryCoverEntry(embedded, size), "embedded")
+    }
+    val uri = PowerampAPI.AA_ROOT_URI.buildUpon()
+      .appendEncodedPath("files")
+      .appendEncodedPath(candidate.realId.toString())
+      .build()
+    val result = loadScaledCoverBase64Detailed(uri, size, LIBRARY_COVER_JPEG_QUALITY)
+    return (result as? CoverLoadResult.Ready)?.base64?.let {
+      LibraryCoverResolution(libraryCoverEntry(it, size), "poweramp_album_art")
+    }
+  }
+
+  private fun loadLegacyLibraryCover(
+    candidate: LibraryCoverCandidate,
+    size: Int
+  ): LibraryCoverResolution? {
     val uri = PowerampAPI.AA_ROOT_URI.buildUpon()
       .appendEncodedPath("files")
       .appendEncodedPath(candidate.realId.toString())
@@ -935,10 +1048,41 @@ class PowerampGateway(
     val base64 = (result as? CoverLoadResult.Ready)?.base64
       ?: loadFallbackTrackCover(candidate.sourcePath, size)
       ?: return null
-    // Include the requested size in the validator. If the source image is already
-    // smaller than two requested sizes, the encoded bytes may be identical; a
-    // byte-only hash would then incorrectly return 304 for the wrong variant.
-    return LibraryCoverCacheEntry(base64, sha1(size, Base64.decode(base64, Base64.NO_WRAP)))
+    return LibraryCoverResolution(
+      entry = libraryCoverEntry(base64, size),
+      readMethod = if (result is CoverLoadResult.Ready) "poweramp_album_art" else "legacy_fallback"
+    )
+  }
+
+  private fun libraryCoverEntry(base64: String, size: Int): LibraryCoverCacheEntry {
+    val bytes = Base64.decode(base64, Base64.NO_WRAP)
+    val hash = sha1(size, bytes)
+    return encodedLibraryCoverCache.computeIfAbsent("$size:$hash") {
+      val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+      LibraryCoverCacheEntry(
+        base64 = base64,
+        hash = hash,
+        width = bounds.outWidth.coerceAtLeast(0),
+        height = bounds.outHeight.coerceAtLeast(0)
+      )
+    }
+  }
+
+  private fun loadEmbeddedTrackCover(sourcePath: String, size: Int): String? {
+    val file = localFileForPath(sourcePath) ?: return null
+    val embedded = runCatching {
+      val retriever = MediaMetadataRetriever()
+      try {
+        retriever.setDataSource(file.absolutePath)
+        retriever.embeddedPicture
+      } finally {
+        retriever.release()
+      }
+    }.onFailure { error ->
+      Timber.d(error, "Unable to read embedded cover from %s", file)
+    }.getOrNull() ?: return null
+    return decodeArtworkBase64(embedded, size, LIBRARY_COVER_JPEG_QUALITY)
   }
 
   private fun loadFallbackTrackCover(sourcePath: String, size: Int): String? {
@@ -995,6 +1139,27 @@ class PowerampGateway(
     val digest = MessageDigest.getInstance("SHA-1")
     digest.update("mbrc-cover-v1:$size:".toByteArray(Charsets.UTF_8))
     return digest.digest(bytes).joinToString("") { "%02x".format(it) }
+  }
+
+  private fun libraryCoverFingerprint(sourcePath: String): String {
+    val file = localFileForPath(sourcePath)
+    val source = if (file?.isFile == true) {
+      "${file.absolutePath}:${file.length()}:${file.lastModified()}"
+    } else {
+      sourcePath.ifBlank { "unknown" }
+    }
+    val digest = MessageDigest.getInstance("SHA-1")
+    return digest.digest(source.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+  }
+
+  private fun <T> withLibraryCoverLock(key: String, action: () -> T): T {
+    val proposedLock = Any()
+    val lock = libraryCoverLoadLocks.putIfAbsent(key, proposedLock) ?: proposedLock
+    return try {
+      synchronized(lock, action)
+    } finally {
+      libraryCoverLoadLocks.remove(key, lock)
+    }
   }
 
   override fun readNowPlayingItems(): List<PowerampQueueItem> {
@@ -2499,13 +2664,26 @@ class PowerampGateway(
 
   private data class LibraryCoverCacheEntry(
     val base64: String,
-    val hash: String
+    val hash: String,
+    val width: Int,
+    val height: Int
+  )
+
+  private data class LibraryCoverResolution(
+    val entry: LibraryCoverCacheEntry,
+    val readMethod: String
   )
 
   private data class LibraryCoverCandidate(
     val realId: Long,
     val sourcePath: String
   )
+
+  private fun Any?.asPositiveLongOrNull(): Long? = when (this) {
+    is Number -> toLong().takeIf { it > 0L }
+    is String -> toLongOrNull()?.takeIf { it > 0L }
+    else -> null
+  }
 
   private data class LibraryQueryDefinition(
     val path: String,
@@ -2555,10 +2733,12 @@ class PowerampGateway(
     const val NEGATIVE_COVER_CACHE_MS = 30_000L
     const val MAX_COVER_DIMENSION = 1024
     const val COVER_JPEG_QUALITY = 95
-    const val DEFAULT_LIBRARY_COVER_SIZE = 160
+    const val DEFAULT_LIBRARY_COVER_SIZE = 300
     const val MIN_LIBRARY_COVER_SIZE = 64
-    const val MAX_LIBRARY_COVER_SIZE = 256
+    const val MAX_LIBRARY_COVER_SIZE = 300
     const val LIBRARY_COVER_JPEG_QUALITY = 80
+    const val LIBRARY_IDENTITY_PREFERENCES = "bridge_library_identity"
+    const val LIBRARY_SOURCE_ID_KEY = "library_source_id"
     val REPLACING_QUEUE_TYPES = setOf("now", "default", "next", "last", "add-all")
   }
 }
