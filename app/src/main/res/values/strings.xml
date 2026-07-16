@@ -35,7 +35,7 @@
   <string name="connection_address_hint">Use this IP and TCP port in the MBRC controller.</string>
   <string name="connection_other_address">Other address</string>
   <string name="connection_tailscale_title">Which network should I use?</string>
-  <string name="connection_tailscale_hint">On the same Wi-Fi, use the phone's LAN IP. With Tailscale, both devices must be signed in to the same tailnet; use the phone's Tailscale IP.</string>
+  <string name="connection_tailscale_hint">On the same Wi-Fi, use the phone LAN IP. With Tailscale, both devices must be signed in to the same tailnet; use the phone Tailscale IP.</string>
   <string name="connection_scan_hint">The MBRC controller may also discover this bridge automatically.</string>
 
   <string name="settings_summary">Change how the bridge starts and stays available.</string>
