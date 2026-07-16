@@ -13,7 +13,16 @@ internal data class NotificationTextResources(
   val bridgeMinimalSubtext: String,
   val notificationNoTrack: String,
   val stopLabel: String,
-  val restartLabel: String
+  val restartLabel: String,
+  val stoppingTitle: String = "Poweramp Bridge is stopping",
+  val manualStoppedTitle: String = "Poweramp Bridge was stopped manually",
+  val portLabel: (Int) -> String = { port -> "Port $port" },
+  val controllerLabel: (String) -> String = { client -> "Controller $client" },
+  val idLabel: (String) -> String = { id -> "ID $id" },
+  val broadcastReady: String = "Broadcast ready",
+  val broadcastWaiting: String = "Broadcast waiting for initialization",
+  val broadcastNone: String = "No broadcast socket",
+  val requestsLabel: (Int) -> String = { count -> "Requests $count" }
 )
 
 internal data class NotificationSnapshot(
@@ -43,7 +52,16 @@ internal class BridgeNotificationPresenter(
       bridgeMinimalSubtext = context.getString(R.string.notification_minimal_subtext),
       notificationNoTrack = context.getString(R.string.notification_no_track),
       stopLabel = context.getString(R.string.notification_stop),
-      restartLabel = context.getString(R.string.notification_restart)
+      restartLabel = context.getString(R.string.notification_restart),
+      stoppingTitle = context.getString(R.string.notification_stopping_title),
+      manualStoppedTitle = context.getString(R.string.notification_manual_stopped_title),
+      portLabel = { port -> context.getString(R.string.notification_port, port) },
+      controllerLabel = { client -> context.getString(R.string.notification_controller, client) },
+      idLabel = { id -> context.getString(R.string.notification_id, id) },
+      broadcastReady = context.getString(R.string.notification_broadcast_ready),
+      broadcastWaiting = context.getString(R.string.notification_broadcast_waiting),
+      broadcastNone = context.getString(R.string.notification_broadcast_none),
+      requestsLabel = { count -> context.getString(R.string.notification_requests, count) }
     ),
     context = context,
     launchIntent = launchIntent,
@@ -57,8 +75,8 @@ internal class BridgeNotificationPresenter(
   fun snapshot(state: BridgeUiState): NotificationSnapshot =
     NotificationSnapshot(
       title = when {
-        state.serviceStopping -> "Poweramp Bridge 正在停止"
-        state.manualStopActive && !state.serviceRunning -> "Poweramp Bridge 已手動停止"
+        state.serviceStopping -> textResources.stoppingTitle
+        state.manualStopActive && !state.serviceRunning -> textResources.manualStoppedTitle
         state.listenerActive -> textResources.bridgeTitle
         else -> textResources.bridgeStoppedTitle
       },
@@ -70,21 +88,21 @@ internal class BridgeNotificationPresenter(
         textResources.notificationNoTrack
       },
       subText = if (minimalMode) {
-        state.serviceStopSummary ?: textResources.bridgeMinimalSubtext
+        textResources.bridgeMinimalSubtext
       } else {
-        state.serviceStopSummary ?: buildList {
-        add("連接埠 ${state.listenPort}")
-        state.activeClient?.let { add("主端 $it") }
-        state.clientId?.let { add("ID $it") }
+        buildList {
+        add(textResources.portLabel(state.listenPort))
+        state.activeClient?.let { add(textResources.controllerLabel(it)) }
+        state.clientId?.let { add(textResources.idLabel(it)) }
         add(
           when {
-            state.broadcastInitialized -> "廣播已就緒"
-            state.broadcastSocketConnected -> "廣播等待初始化"
-            else -> "沒有廣播 Socket"
+            state.broadcastInitialized -> textResources.broadcastReady
+            state.broadcastSocketConnected -> textResources.broadcastWaiting
+            else -> textResources.broadcastNone
           }
         )
         if (state.requestSocketConnected) {
-          add("請求 ${state.activeRequestSocketCount}")
+          add(textResources.requestsLabel(state.activeRequestSocketCount))
         }
       }.joinToString(" | ")
       },
