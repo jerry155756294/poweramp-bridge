@@ -128,23 +128,25 @@ class MbrcProtocolServerTest {
     val server = MbrcProtocolServer(
       codec = JsonMessageCodec(),
       listener = listener,
-      handshakeTimeoutMs = 100,
-      probeIdleTimeoutMs = 100
+      handshakeTimeoutMs = 1_000,
+      probeIdleTimeoutMs = 300
     )
 
     server.start(port)
     val client = Socket("127.0.0.1", port)
     try {
+      client.soTimeout = 1_000
       val writer = BufferedWriter(OutputStreamWriter(client.getOutputStream()))
       val reader = BufferedReader(InputStreamReader(client.getInputStream()))
       writer.write("{\"context\":\"verifyconnection\",\"data\":null}\r\n")
       writer.flush()
 
-      val reply = JsonMessageCodec().parse(withTimeout(1_000) { reader.readLine() })
+      val replyLine = requireNotNull(reader.readLine()) { "server closed before verifyconnection reply" }
+      val reply = JsonMessageCodec().parse(replyLine)
       assertEquals("verifyconnection", reply.context)
       assertEquals(true, reply.data)
 
-      val closed = withTimeout(750) { connectionClosed.await() }
+      val closed = withTimeout(2_000) { connectionClosed.await() }
       assertEquals("probe_idle_timeout", closed.disconnectCategory)
     } finally {
       client.close()
