@@ -36,6 +36,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import kotlin.math.ceil
+import kotlin.math.roundToInt
 
 class PowerampGateway(
   private val context: Context,
@@ -2012,11 +2013,21 @@ class PowerampGateway(
   }
 
   override fun setVolume(volumePercent: Int) {
-    val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
     val clamped = volumePercent.coerceIn(0, 100)
-    val streamValue = ((clamped / 100f) * max).toInt().coerceIn(0, max)
-    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, streamValue, 0)
-    updateVolumeSnapshot()
+    runCatching {
+      val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+      val streamValue = ((clamped / 100f) * max).roundToInt().coerceIn(0, max)
+      audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, streamValue, 0)
+      updateVolumeSnapshot()
+      stateRepository.recordPowerampEvent(
+        "System music volume set: requested=$clamped% stream=$streamValue/$max actual=${stateRepository.state.value.playback.volume}%"
+      )
+    }.onFailure { error ->
+      Timber.w(error, "Unable to set system music volume")
+      stateRepository.recordPowerampEvent(
+        "System music volume set failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
+      )
+    }
   }
 
   private fun updateVolumeSnapshot() {

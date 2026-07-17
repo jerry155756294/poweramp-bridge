@@ -46,7 +46,7 @@ class MbrcProtocolAdapter(
         if (volume != null) {
           powerampGateway.setVolume(volume)
           powerampGateway.refreshVolumeSnapshot()
-          listOf(codec.encode(ProtocolConstants.PlayerVolume, volume))
+          listOf(codec.encode(ProtocolConstants.PlayerVolume, stateRepository.state.value.playback.volume))
         } else {
           listOf(codec.encode(ProtocolConstants.PlayerVolume, stateRepository.state.value.playback.volume))
         }
