@@ -4,6 +4,8 @@
   <string name="bridge_channel_description">TCP bridge from MBRC to Poweramp</string>
   <string name="bridge_notification_title">Poweramp Bridge is running</string>
   <string name="bridge_notification_stopped">Poweramp Bridge is stopped</string>
+  <string name="notification_minimal_summary">Bridge service is running</string>
+  <string name="notification_minimal_subtext">Minimal notification mode keeps the foreground-service notification stable.</string>
   <string name="notification_no_track">Nothing is playing</string>
   <string name="notification_stop">Stop</string>
   <string name="notification_restart">Restart</string>
@@ -41,9 +43,12 @@
   <string name="settings_port_label">TCP port</string>
   <string name="settings_port_hint">Use the same port when connecting from MBRC.</string>
   <string name="settings_service_title">Service</string>
+  <string name="settings_auto_start">Start Bridge when this app opens</string>
   <string name="settings_start_on_boot">Start Bridge after device boot</string>
+  <string name="settings_start_explanation">These options are independent: one follows the app, the other follows the device.</string>
   <string name="settings_foreground_persistent">Keep the foreground-service notification</string>
   <string name="settings_foreground_explanation">Android requires a foreground service to show a notification while Bridge is running.</string>
+  <string name="settings_minimal_diagnostics">Minimal notification mode</string>
   <string name="settings_advanced_diagnostics">Advanced diagnostics</string>
   <string name="settings_advanced_on">Raw protocol categories and handshake details are shown in Diagnostics.</string>
   <string name="settings_advanced_off">Diagnostics use short, human-readable event summaries.</string>
@@ -75,6 +80,22 @@
   <string name="poweramp_section_title">Poweramp</string>
   <string name="poweramp_availability">Availability</string>
   <string name="playback_status">Playback</string>
+
+  <string name="poweramp_access_title">Poweramp data access</string>
+  <string name="status">Status</string>
+  <string name="access_available">Available</string>
+  <string name="access_available_summary">Bridge can read Poweramp library and broadcast data.</string>
+  <string name="access_requested">Checking</string>
+  <string name="access_requested_summary">The access request was sent. Bridge is checking Poweramp.</string>
+  <string name="access_failed">Unavailable</string>
+  <string name="access_failed_summary">Poweramp has not provided library access. Open Poweramp and try again.</string>
+  <string name="access_waiting">Waiting</string>
+  <string name="access_waiting_summary">An earlier request is waiting for Poweramp to respond.</string>
+  <string name="access_not_requested">Not requested</string>
+  <string name="access_not_requested_summary">Granting access lets Bridge read Poweramp library data.</string>
+  <string name="request_access">Request Poweramp access</string>
+  <string name="request_again">Request access again</string>
+  <string name="access_waiting_body">Waiting for Poweramp. This card updates when the result is known.</string>
 
   <string name="advanced_mode">Advanced mode</string>
   <string name="simple_mode">Simple mode</string>
