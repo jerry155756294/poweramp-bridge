@@ -95,7 +95,7 @@ class MainActivity : ComponentActivity() {
           BridgeApp(
             state = app.appContainer.stateRepository.state,
             settingsRepository = app.appContainer.settingsRepository,
-            onStart = { BridgeService.start(this) },
+            onStart = { serviceRunning -> BridgeService.startOrRestart(this, serviceRunning) },
             onStop = { BridgeService.stop(this) }
           )
         }
@@ -109,7 +109,7 @@ class MainActivity : ComponentActivity() {
 private fun BridgeApp(
   state: StateFlow<BridgeUiState>,
   settingsRepository: BridgeSettingsRepository,
-  onStart: () -> Unit,
+  onStart: (serviceRunning: Boolean) -> Unit,
   onStop: () -> Unit
 ) {
   val uiState by state.collectAsStateWithLifecycle()
@@ -195,7 +195,7 @@ private fun BottomNavigationBar(
 private fun ConnectTab(
   uiState: BridgeUiState,
   settings: BridgeSettings,
-  onStart: () -> Unit,
+  onStart: (serviceRunning: Boolean) -> Unit,
   onStop: () -> Unit,
   repository: BridgeSettingsRepository,
   modifier: Modifier = Modifier
@@ -429,12 +429,12 @@ private fun HighlightChip(label: String, value: String) {
 private fun ServiceActionRow(
   serviceRunning: Boolean,
   serviceStopping: Boolean,
-  onStart: () -> Unit,
+  onStart: (serviceRunning: Boolean) -> Unit,
   onStop: () -> Unit
 ) {
   Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
     Button(
-      onClick = onStart,
+      onClick = { onStart(serviceRunning) },
       enabled = !serviceStopping,
       modifier = Modifier.weight(1f),
       shape = MaterialTheme.shapes.large,

@@ -108,7 +108,7 @@ class BridgeService : Service() {
       restartIntent = PendingIntent.getService(
         this,
         3,
-        Intent(this, BridgeService::class.java).setAction(ACTION_RESTART),
+        restartIntent(this),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
       )
     )
@@ -848,13 +848,25 @@ class BridgeService : Service() {
     private const val VERY_SLOW_REQUEST_MS = 1000L
     private const val RESTART_STATUS_MINIMUM_MS = 350L
     private const val ACTION_STOP = "com.jerry155756294.powerampbridge.action.STOP"
-    private const val ACTION_RESTART = "com.jerry155756294.powerampbridge.action.RESTART"
+    internal const val ACTION_RESTART = "com.jerry155756294.powerampbridge.action.RESTART"
 
     fun start(context: Context) {
       ContextCompat.startForegroundService(
         context,
-        Intent(context, BridgeService::class.java)
+        startIntent(context)
       )
+    }
+
+    fun startOrRestart(context: Context, serviceRunning: Boolean) {
+      if (serviceRunning) {
+        restart(context)
+      } else {
+        start(context)
+      }
+    }
+
+    fun restart(context: Context) {
+      ContextCompat.startForegroundService(context, restartIntent(context))
     }
 
     fun stop(context: Context) {
@@ -862,6 +874,11 @@ class BridgeService : Service() {
         Intent(context, BridgeService::class.java).setAction(ACTION_STOP)
       )
     }
+
+    private fun startIntent(context: Context): Intent = Intent(context, BridgeService::class.java)
+
+    private fun restartIntent(context: Context): Intent =
+      Intent(context, BridgeService::class.java).setAction(ACTION_RESTART)
   }
 
   private data class PendingLatencyMeasurement(

@@ -24,10 +24,12 @@ import timber.log.Timber
 class MbrcProtocolServer(
   private val codec: JsonMessageCodec,
   private val listener: Listener,
-  private val handshakeTimeoutMs: Int = HANDSHAKE_TIMEOUT_MS
+  private val handshakeTimeoutMs: Int = HANDSHAKE_TIMEOUT_MS,
+  private val probeIdleTimeoutMs: Int = PROBE_IDLE_TIMEOUT_MS
 ) {
   companion object {
     private const val HANDSHAKE_TIMEOUT_MS = 10_000
+    private const val PROBE_IDLE_TIMEOUT_MS = 1_000
   }
 
   interface Listener {
@@ -189,7 +191,13 @@ class MbrcProtocolServer(
       }
     } catch (error: SocketTimeoutException) {
       closeReason = mutex.withLock {
-        protocolManager.handshakeTimeoutCategory(socketId) ?: "socket_read_error:${error.javaClass.simpleName}"
+        val snapshot = protocolManager.connectionDebugSnapshot(socketId)
+        if (snapshot?.role == SocketRole.PROBE) {
+          "probe_idle_timeout"
+        } else {
+          protocolManager.handshakeTimeoutCategory(socketId)
+            ?: "socket_read_error:${error.javaClass.simpleName}"
+        }
       }
       mutex.withLock { protocolManager.markDisconnectCategory(socketId, closeReason) }
       listener.onProtocolEvent("$closeReason:${shortSocketId(socketId)}")
@@ -312,12 +320,10 @@ class MbrcProtocolServer(
 
   private suspend fun applyReadTimeout(socketId: String, session: ClientSession) {
     val snapshot = mutex.withLock { protocolManager.connectionDebugSnapshot(socketId) } ?: return
-    val timeoutMs = if (
-      snapshot.handshakeState == HandshakeState.READY || snapshot.role == SocketRole.PROBE
-    ) {
-      0
-    } else {
-      handshakeTimeoutMs
+    val timeoutMs = when {
+      snapshot.handshakeState == HandshakeState.READY -> 0
+      snapshot.role == SocketRole.PROBE -> probeIdleTimeoutMs
+      else -> handshakeTimeoutMs
     }
     session.setReadTimeout(timeoutMs)
   }
