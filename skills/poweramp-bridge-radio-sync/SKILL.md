@@ -1,44 +1,30 @@
 ---
 name: poweramp-bridge-radio-sync
-description: Implement Poweramp-backed `radiostations` listing and stream playback mapping in `poweramp-bridge`. Use when MBRC radio replies should come from Poweramp streams, radio selections should trigger real stream playback, and adapter diagnostics must show whether list or play behavior failed.
+description: Diagnose and complete Poweramp-backed radio-station listing and sender-side radio playback semantics.
 ---
 
 # Poweramp Bridge Radio Sync
 
-Read `../poweramp-bridge-roadmap-dispatch/references/implementation-contract.md` before editing.
+Use this skill when `radiostations` is empty, duplicated, incomplete, or a sender cannot turn a listed station into playback.
 
-## Primary Files
+## Current design
 
-- `app/src/main/kotlin/com/jerry155756294/powerampbridge/bridge/PowerampController.kt`
-- `app/src/main/kotlin/com/jerry155756294/powerampbridge/bridge/PowerampGateway.kt`
-- `app/src/main/kotlin/com/jerry155756294/powerampbridge/protocol/MbrcProtocolAdapter.kt`
-- `app/src/main/java/com/maxmpz/poweramp/player/PowerampAPI.java`
-- `app/src/main/java/com/maxmpz/poweramp/player/TableDefs.kt`
-- radio-related tests under `app/src/test/kotlin`
+`PowerampGateway.readRadioStations()` aggregates and normalizes stations from Poweramp streams, playlists, library files, active category entries, and HTTP queue entries. It records a source-count diagnostic for each query. `MbrcProtocolAdapter` returns stations in the normal paged response shape.
 
-## Goals
+## Remaining verification boundary
 
-- Return Poweramp stream/radio rows from `radiostations`.
-- Dispatch selected radio items to real Poweramp stream playback.
-- Make failures visible as either list-query failures or play-dispatch failures.
+Station listing is implemented. Sender-specific selection/play contexts still require real sender evidence before adding a dispatch mapping. Do not claim radio playback works merely because the station list is populated.
 
-## Required Changes
+## Investigation order
 
-- Extend `PowerampController` with radio list and stream play APIs.
-- Query `content://com.maxmpz.audioplayer.data/streams`.
-- Preserve sender-meaningful item fields such as name and playable identifier.
-- Prefer playback by Poweramp-native identifier or provider URI; fall back to URL playback only when needed.
-- Replace sender-safe noop handling for relevant radio-play contexts with real playback handling.
-- If sender context mapping is uncertain, log all candidate contexts with enough detail to finish device verification later.
+1. Confirm Poweramp data access is available.
+2. Capture the radio source-count diagnostic and inspect the paged reply.
+3. Confirm the sender emits a selection/play context when a station is chosen.
+4. Map only that observed context to an existing Poweramp-native URI or path dispatch.
+5. Verify the resulting Poweramp track/category change and add an adapter regression test.
 
-## Keep In Mind
+## Guardrails
 
-- Do not create a separate long-lived bridge-owned radio database.
-- Do not fake successful playback if dispatch fails.
-- Keep the page reply shape identical to other paged MBRC responses.
-
-## Expected Evidence
-
-- Tests for non-empty and empty `radiostations` replies.
-- Tests for playback dispatch success and failure replies.
-- A short note in code or diagnostics describing which contexts now trigger radio playback.
+- Keep Poweramp as the source of truth; do not create a bridge-owned radio database.
+- Preserve real station identifiers, names, and URLs/paths.
+- Return an explicit unavailable response rather than fake successful playback.

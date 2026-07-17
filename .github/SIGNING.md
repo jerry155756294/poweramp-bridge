@@ -1,6 +1,8 @@
 # Android release signing
 
-All installable release APKs and Play Store bundles use one permanent release keystore. It is intentionally not tracked in Git. GitHub Actions restores it only inside the runner while a signed build is running:
+Release artifacts use one permanent keystore. The keystore and its properties are local secrets and must never be committed. GitHub Actions restores the keystore only in the runner for a signed build.
+
+Required repository secrets:
 
 - `ANDROID_KEYSTORE_BASE64`
 - `ANDROID_KEYSTORE_PASSWORD`
@@ -13,15 +15,17 @@ Create the Base64 secret from the local keystore with:
 [Convert]::ToBase64String([IO.File]::ReadAllBytes('.signing/poweramp-bridge-release.jks')) | Set-Clipboard
 ```
 
-Copy the store password, alias, and key password from `.signing/release-signing.properties`. Never commit either file. The signing workflow only uploads GitHub Actions artifacts; it does not create or publish a GitHub Release. Pull requests never receive signing secrets.
+Copy the remaining values from `.signing/release-signing.properties`. Do not commit either file.
 
-## Which artifact to install
+## Artifact policy
 
-- Pushes and manual/tagged Actions runs produce `poweramp-bridge-release-apk` and `poweramp-bridge-release-aab`. These are signed with the stable release certificate and are the only artifacts intended for device updates or distribution.
-- Pull requests may produce `poweramp-bridge-pr-debug-apk`. It uses an ephemeral CI debug key and is for validation only; do not install it over a release build.
+- `.github/workflows/android-ci.yml` runs compilation and unit tests for its configured pushes, pull requests, and manual dispatches.
+- Non-pull-request CI runs build and upload the signed `poweramp-bridge-release-apk` and `poweramp-bridge-release-aab` artifacts.
+- Pull-request CI runs upload the validation-only `poweramp-bridge-pr-debug-apk` artifact.
+- `.github/workflows/android-release.yml` is a manual signed-release workflow with the same release artifact names.
 
-The CI release path fails closed when the signing secrets are missing. This prevents an unsigned or newly generated key from silently becoming a distribution build. The build also uses APK Signature Scheme v2/v3.
+Install or distribute only the signed release APK. The pull-request debug APK uses an ephemeral CI debug key and cannot reliably update a release installation.
 
-Because earlier debug APKs were signed by temporary runner keys, the first migration to the permanent release key requires uninstalling the old debug package once. Future release APKs can update each other as long as the application id remains `com.jerry155756294.powerampbridge` and `versionCode` increases.
+The signing steps fail closed when a secret is missing. The workflows verify the release APK with `apksigner` before upload and publish artifacts only; they do not create GitHub Releases.
 
-To publish through Google Play, upload the AAB and enroll the app in Google Play App Signing. A stable local/CI certificate prevents signature mismatch, but no sideloaded APK can guarantee that Play Protect will never warn; Play distribution is the path that provides Google Play's normal trust and verification flow.
+The first move from an older debug-signed installation to the permanent release certificate requires one uninstall. Later release APKs can update each other when the application id remains `com.jerry155756294.powerampbridge` and `versionCode` increases.

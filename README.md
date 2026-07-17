@@ -1,44 +1,37 @@
 # Poweramp Bridge
 
-`poweramp-bridge` is an Android receiver app that accepts the existing MBRC TCP/JSON protocol and bridges it to Poweramp through the Poweramp API.
+`poweramp-bridge` is an Android receiver that accepts the MBRC TCP/JSON protocol and bridges it to Poweramp through the Poweramp API. It lets an existing [musicbeeremote/mbrc](https://github.com/musicbeeremote/mbrc) sender control a Poweramp device with minimal or no sender-side changes.
 
-The goal is to let an existing [musicbeeremote/mbrc](https://github.com/musicbeeremote/mbrc) sender connect with minimal or no sender-side changes while controlling a device that is running Poweramp.
+The project is an independent compatibility implementation. It does not bundle or reuse `mbrc` or `mbrc-plugin` source code and is not affiliated with MusicBee Remote.
 
-## Current focus
+## Current capabilities
 
-- Frontend service driven receiver app
-- MBRC-compatible TCP handshake and command flow
-- Poweramp playback, seek, volume, repeat, and shuffle bridging
-- Single logical sender support with one broadcast socket and multiple request sockets
-- On-device status and debug UI for connection diagnostics
+- Foreground Android receiver with a TCP MBRC listener and multicast discovery responder.
+- Protocol v4 handshake with one logical sender, one broadcast socket, and short-lived request/probe sockets.
+- Playback, seek, volume, repeat, shuffle, ratings, lyrics, covers, queue and playlist controls.
+- Poweramp-backed library browsing, queue data, playlist data, and radio-station discovery.
+- On-device connection status, diagnostics, and logcat evidence for protocol, command, Poweramp, and disconnect events.
 
-## Compatibility notes
+## Compatibility boundaries
 
-- This project implements compatibility with the MBRC protocol.
-- It is an independent reimplementation and is not affiliated with MusicBee Remote.
-- It does not bundle the original `mbrc` or `mbrc-plugin` source code.
+- Queue, radio, library, and cover paths are implemented but still need broad real-sender verification.
+- Sender UI behavior and bridge execution are diagnosed separately. A shell payload or receiver log can prove the bridge path even when a sender UI action does not emit its expected command.
+- Multi-sender coordination, shared-token authentication, and full MusicBee feature parity are outside the current scope.
 
-## Known issue
+## Same-device media-session caveat
 
-- On some Xiaomi/MIUI devices, when testing with localhost or a same-device sender app alongside Poweramp, MIUI SystemUI may prioritize the sender app's MediaSession and dispatch `pause` to Poweramp.
-- Current evidence indicates this is a SystemUI MediaSession arbitration issue rather than a bridge protocol failure.
+On some Android builds, a same-device sender or SystemUI MediaSession can take media-button priority and cause Poweramp to receive `pause`. Treat that as a device media-session arbitration question until receiver protocol and Poweramp logs show a bridge command caused it.
 
-## Build
+## Build artifacts
 
-GitHub Actions runs debug compilation and unit tests for every change. Pushes and manual Actions runs additionally build a release-signed APK and AAB using the repository's permanent keystore; pull requests only expose a debug APK for validation. These workflows upload artifacts only and do not publish GitHub Releases.
+GitHub Actions is the authoritative build path when CI output is requested.
 
 - Workflow: `.github/workflows/android-ci.yml`
-- Distribution APK artifact: `poweramp-bridge-release-apk`
-- Google Play bundle artifact: `poweramp-bridge-release-aab`
+- Push/manual CI artifacts: `poweramp-bridge-release-apk`, `poweramp-bridge-release-aab`
 - Pull-request validation artifact: `poweramp-bridge-pr-debug-apk`
+- Manual release workflow: `.github/workflows/android-release.yml`
 
-Use the release APK for installation and updates. Do not use the pull-request debug APK as a release update; its CI debug certificate is intentionally not stable.
-
-For local builds:
-
-```bash
-./gradlew assembleDebug
-```
+Use a signed release APK for installation or updates. The pull-request debug APK is for validation only and is not a stable update target.
 
 ## License
 

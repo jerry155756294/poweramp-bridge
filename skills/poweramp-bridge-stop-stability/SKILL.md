@@ -1,45 +1,28 @@
 ---
 name: poweramp-bridge-stop-stability
-description: Stabilize `Settings -> Stop Bridge`, service teardown, and manual-stop-versus-autoStart behavior in `poweramp-bridge`. Use when the bridge may restart itself after a manual stop, crash during service teardown, or need clearer stop diagnostics in the UI and notification state.
+description: Regress-test and diagnose manual BridgeService stop, restart, and teardown behavior in `poweramp-bridge`.
 ---
 
 # Poweramp Bridge Stop Stability
 
-Read `../poweramp-bridge-roadmap-dispatch/references/implementation-contract.md` before editing.
+Use this skill when Settings stop/restart behavior, foreground notification state, or a teardown race regresses.
 
-## Primary Files
+## Current design
 
-- `app/src/main/kotlin/com/jerry155756294/powerampbridge/MainActivity.kt`
-- `app/src/main/kotlin/com/jerry155756294/powerampbridge/bridge/BridgeService.kt`
-- `app/src/main/kotlin/com/jerry155756294/powerampbridge/bridge/BridgeStateRepository.kt`
-- `app/src/main/kotlin/com/jerry155756294/powerampbridge/bridge/BridgeModels.kt`
+- `BridgeStateRepository` owns `manualStopActive` plus stopping/stopped summaries for UI and notifications.
+- `BridgeService` makes stop handling idempotent, cancels runtime jobs, stops the protocol server and Poweramp gateway, and publishes final state.
+- A manual stop is an in-process override; a normal fresh start clears it.
 
-## Goals
+## Regression checks
 
-- Make manual stop deterministic and crash-free.
-- Prevent `autoStart=true` from immediately reviving the service after a manual stop.
-- Expose enough stop-state information for UI and diagnostics.
+1. Stop from the in-app control while the service is fully running.
+2. Repeat the stop request and verify no crash or duplicate teardown.
+3. Stop during partial startup or an active socket session.
+4. Start again and verify the manual-stop state is cleared only for the new normal start.
+5. Check that notification and diagnostics agree with service state.
 
-## Required Changes
+## Guardrails
 
-- Add an explicit manual-stop or stopping state owned by repository/UI state rather than inferred from service death.
-- Gate `MainActivity` auto-start behavior on that state.
-- Make `BridgeService` stop flow idempotent:
-  - stop accepting new work
-  - cancel ticker and latency jobs
-  - stop protocol server
-  - stop `PowerampGateway`
-  - publish final stopped state
-- Tolerate partial initialization and repeated stop calls in `onDestroy()`.
-
-## Keep In Mind
-
-- Do not weaken foreground-service startup behavior for normal starts.
-- Do not push stop-only state into protocol classes.
-- Do not require a persistent user preference for the manual-stop override; keep it in-process only.
-
-## Expected Evidence
-
-- A unit-testable rule for manual stop.
-- Updated status/debug UI signals showing whether the bridge is stopping or manually held stopped.
-- Notes about any remaining real-device-only validation gaps.
+- Do not move stop-only UI state into protocol classes.
+- Do not weaken normal foreground startup to solve a stop-only bug.
+- Treat socket closures after deliberate teardown as expected unless process evidence shows otherwise.
