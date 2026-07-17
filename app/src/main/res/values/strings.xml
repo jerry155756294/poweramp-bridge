@@ -27,6 +27,7 @@
   <string name="tab_diagnostics_subtitle">A record of what happened on the bridge.</string>
 
   <string name="service_ready">Ready to accept connections</string>
+  <string name="service_restarting">Restarting: closing the listener</string>
   <string name="service_stopped">Service is stopped</string>
   <string name="connection_active">An MBRC controller is connected.</string>
   <string name="connection_none">No MBRC controller is connected.</string>
@@ -64,6 +65,7 @@
   <string name="restart_bridge">Restart Bridge</string>
   <string name="stop_bridge">Stop Bridge</string>
   <string name="listener">Listener</string>
+  <string name="listener_restarting">Closing…</string>
   <string name="client">Controller</string>
   <string name="playback">Playback</string>
   <string name="position_sync">Position sync</string>

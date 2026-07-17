@@ -28,7 +28,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BugReport
-import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -132,19 +131,11 @@ private fun BridgeApp(
         settings = settings,
         onStart = onStart,
         onStop = onStop,
-        modifier = Modifier.padding(padding)
-      )
-      BridgeDestination.Settings -> SettingsTab(
-        uiState = uiState,
-        settings = settings,
-        onStart = onStart,
-        onStop = onStop,
         repository = settingsRepository,
         modifier = Modifier.padding(padding)
       )
       BridgeDestination.Diagnostics -> DiagnosticsTab(
         uiState = uiState,
-        advancedMode = settings.advancedDiagnosticsEnabled,
         modifier = Modifier.padding(padding)
       )
     }
@@ -157,7 +148,6 @@ private enum class BridgeDestination(
   val icon: ImageVector
 ) {
   Connect(R.string.tab_connect, R.string.tab_connect_subtitle, Icons.Rounded.Tune),
-  Settings(R.string.tab_settings, R.string.tab_settings_subtitle, Icons.Rounded.Settings),
   Diagnostics(R.string.tab_diagnostics, R.string.tab_diagnostics_subtitle, Icons.Rounded.BugReport)
 }
 
@@ -207,10 +197,18 @@ private fun ConnectTab(
   settings: BridgeSettings,
   onStart: () -> Unit,
   onStop: () -> Unit,
+  repository: BridgeSettingsRepository,
   modifier: Modifier = Modifier
 ) {
   val running = uiState.listenerActive
   val address = uiState.localAddresses.firstOrNull()
+  val scope = rememberCoroutineScope()
+  var portText by remember(settings.port) { mutableStateOf(settings.port.toString()) }
+  val serviceStatus = when {
+    uiState.serviceStopping -> stringResource(R.string.service_restarting)
+    running -> stringResource(R.string.service_ready)
+    else -> stringResource(R.string.service_stopped)
+  }
   Column(
     modifier = modifier
       .fillMaxSize()
@@ -220,7 +218,7 @@ private fun ConnectTab(
   ) {
     ScreenHero(
       destination = BridgeDestination.Connect,
-      accent = stringResource(if (running) R.string.service_ready else R.string.service_stopped),
+      accent = serviceStatus,
       summary = stringResource(if (uiState.activeClient == null) R.string.connection_none else R.string.connection_active)
     )
 
@@ -243,16 +241,8 @@ private fun ConnectTab(
       }
     }
 
-    ServiceActionRow(uiState.serviceRunning, onStart, onStop)
+    ServiceActionRow(uiState.serviceRunning, uiState.serviceStopping, onStart, onStop)
     StatusHighlights(uiState)
-
-    SectionCard(stringResource(R.string.connection_tailscale_title)) {
-      Text(stringResource(R.string.connection_tailscale_hint))
-      Text(
-        stringResource(R.string.connection_scan_hint),
-        style = MaterialTheme.typography.bodySmall
-      )
-    }
 
     SectionCard(stringResource(R.string.poweramp_section_title)) {
       StatusLine(
@@ -264,32 +254,6 @@ private fun ConnectTab(
         playbackStateLabel(uiState.playback.state)
       )
     }
-  }
-}
-
-@Composable
-private fun SettingsTab(
-  uiState: BridgeUiState,
-  settings: BridgeSettings,
-  onStart: () -> Unit,
-  onStop: () -> Unit,
-  repository: BridgeSettingsRepository,
-  modifier: Modifier = Modifier
-) {
-  val scope = rememberCoroutineScope()
-  var portText by remember(settings.port) { mutableStateOf(settings.port.toString()) }
-  Column(
-    modifier = modifier
-      .fillMaxSize()
-      .verticalScroll(rememberScrollState())
-      .padding(horizontal = 16.dp, vertical = 20.dp),
-    verticalArrangement = Arrangement.spacedBy(16.dp)
-  ) {
-    ScreenHero(
-      destination = BridgeDestination.Settings,
-      accent = "TCP ${settings.port}",
-      summary = stringResource(R.string.settings_summary)
-    )
 
     SectionCard(stringResource(R.string.settings_network_title)) {
       OutlinedTextField(
@@ -320,24 +284,15 @@ private fun SettingsTab(
         scope.launch { repository.updateForegroundPersistent(it) }
       }
       Text(stringResource(R.string.settings_foreground_explanation), style = MaterialTheme.typography.bodySmall)
-      SettingSwitch(stringResource(R.string.settings_advanced_diagnostics), settings.advancedDiagnosticsEnabled) {
-        scope.launch { repository.updateAdvancedDiagnostics(it) }
-      }
-      Text(
-        stringResource(if (settings.advancedDiagnosticsEnabled) R.string.settings_advanced_on else R.string.settings_advanced_off),
-        style = MaterialTheme.typography.bodySmall
-      )
     }
 
     BatteryOptimizationCard()
-    ServiceActionRow(uiState.serviceRunning, onStart, onStop)
   }
 }
 
 @Composable
 private fun DiagnosticsTab(
   uiState: BridgeUiState,
-  advancedMode: Boolean,
   modifier: Modifier = Modifier
 ) {
   Column(
@@ -349,20 +304,17 @@ private fun DiagnosticsTab(
   ) {
     ScreenHero(
       destination = BridgeDestination.Diagnostics,
-      accent = stringResource(if (advancedMode) R.string.advanced_mode else R.string.simple_mode),
+      accent = stringResource(R.string.diagnostics_protocol_raw),
       summary = stringResource(R.string.diagnostics_summary)
     )
-    SectionCard(stringResource(R.string.diagnostics_purpose_title)) {
-      Text(stringResource(R.string.diagnostics_purpose_body))
-    }
-    SectionCard(stringResource(if (advancedMode) R.string.diagnostics_protocol_raw else R.string.diagnostics_protocol)) {
-      EventList(uiState.recentProtocolEvents, advancedMode)
+    SectionCard(stringResource(R.string.diagnostics_protocol_raw)) {
+      EventList(uiState.recentProtocolEvents)
     }
     SectionCard(stringResource(R.string.diagnostics_commands)) {
-      EventList(uiState.recentCommands, true)
+      EventList(uiState.recentCommands)
     }
     SectionCard(stringResource(R.string.diagnostics_poweramp)) {
-      EventList(uiState.recentPowerampEvents, true)
+      EventList(uiState.recentPowerampEvents)
     }
   }
 }
@@ -440,7 +392,13 @@ private fun StatusHighlights(uiState: BridgeUiState) {
   ) {
     HighlightChip(
       stringResource(R.string.listener),
-      stringResource(if (uiState.listenerActive) R.string.online else R.string.offline)
+      stringResource(
+        when {
+          uiState.serviceStopping -> R.string.listener_restarting
+          uiState.listenerActive -> R.string.online
+          else -> R.string.offline
+        }
+      )
     )
     HighlightChip(stringResource(R.string.client), uiState.activeClient ?: stringResource(R.string.none))
     HighlightChip(stringResource(R.string.playback), playbackStateLabel(uiState.playback.state))
@@ -468,31 +426,41 @@ private fun HighlightChip(label: String, value: String) {
 }
 
 @Composable
-private fun ServiceActionRow(serviceRunning: Boolean, onStart: () -> Unit, onStop: () -> Unit) {
+private fun ServiceActionRow(
+  serviceRunning: Boolean,
+  serviceStopping: Boolean,
+  onStart: () -> Unit,
+  onStop: () -> Unit
+) {
   Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
     Button(
       onClick = onStart,
+      enabled = !serviceStopping,
       modifier = Modifier.weight(1f),
       shape = MaterialTheme.shapes.large,
       colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
     ) {
       Text(stringResource(if (serviceRunning) R.string.restart_bridge else R.string.start_bridge))
     }
-    TextButton(onClick = onStop, modifier = Modifier.weight(1f), shape = MaterialTheme.shapes.large) {
+    TextButton(
+      onClick = onStop,
+      enabled = !serviceStopping,
+      modifier = Modifier.weight(1f),
+      shape = MaterialTheme.shapes.large
+    ) {
       Text(stringResource(R.string.stop_bridge))
     }
   }
 }
 
 @Composable
-private fun EventList(events: List<LogEntry>, advancedMode: Boolean) {
-  val context = LocalContext.current
+private fun EventList(events: List<LogEntry>) {
   if (events.isEmpty()) {
     Text(stringResource(R.string.no_events))
     return
   }
   events.forEach { entry ->
-    StatusLine(entry.timestamp, if (advancedMode) entry.message else humanizeProtocolEvent(context, entry.message))
+    StatusLine(entry.timestamp, entry.message)
   }
 }
 
@@ -551,22 +519,16 @@ private fun BatteryOptimizationCard() {
     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
   }
 
+  if (isExempt) return
+
   SectionCard(stringResource(R.string.settings_background_title)) {
     Text(
-      stringResource(
-        if (isExempt) R.string.settings_background_unrestricted else R.string.settings_background_restricted
-      ),
+      stringResource(R.string.settings_background_restricted),
       style = MaterialTheme.typography.titleSmall,
       fontWeight = FontWeight.SemiBold
     )
     Text(
-      stringResource(
-        if (isExempt) {
-          R.string.settings_background_unrestricted_summary
-        } else {
-          R.string.settings_background_restricted_summary
-        }
-      ),
+      stringResource(R.string.settings_background_restricted_summary),
       style = MaterialTheme.typography.bodySmall
     )
     Button(
@@ -578,9 +540,7 @@ private fun BatteryOptimizationCard() {
       shape = MaterialTheme.shapes.large
     ) {
       Text(
-        stringResource(
-          if (isExempt) R.string.settings_open_app_battery else R.string.settings_allow_unrestricted
-        )
+        stringResource(R.string.settings_allow_unrestricted)
       )
     }
   }
@@ -604,17 +564,6 @@ private fun Context.requestBatteryOptimizationExemption() {
     .onFailure {
       startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(packageUri))
     }
-}
-
-private fun humanizeProtocolEvent(context: android.content.Context, message: String): String = when {
-  message.startsWith("listener_started:") -> context.getString(R.string.event_listener_started)
-  message.startsWith("listener_stopped") -> context.getString(R.string.event_listener_stopped)
-  message.startsWith("socket_accepted:") -> context.getString(R.string.event_socket_accepted)
-  message.startsWith("socket_rejected:") -> context.getString(R.string.event_socket_rejected)
-  message.startsWith("broadcast_ready:") -> context.getString(R.string.event_broadcast_ready)
-  message.startsWith("socket_closed:") -> context.getString(R.string.event_socket_closed)
-  message.startsWith("socket_in:") -> context.getString(R.string.event_message_received)
-  else -> message
 }
 
 @Composable

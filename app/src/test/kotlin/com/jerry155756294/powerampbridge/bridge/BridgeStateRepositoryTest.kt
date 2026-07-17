@@ -39,6 +39,25 @@ class BridgeStateRepositoryTest {
   }
 
   @Test
+  fun `listener restart remains visible until replacement listener is ready`() {
+    repository.markServiceStarted()
+    repository.setListenerState(true, 3000)
+
+    repository.markServiceRestarting()
+    repository.setListenerState(false, 3000)
+
+    val restarting = repository.state.value
+    assertTrue(restarting.serviceStopping)
+    assertEquals("Bridge 正在重新啟動", restarting.serviceStopSummary)
+
+    repository.setListenerState(true, 3000)
+
+    val ready = repository.state.value
+    assertFalse(ready.serviceStopping)
+    assertNull(ready.serviceStopSummary)
+  }
+
+  @Test
   fun `latency summary tracks dispatch only sample`() {
     repository.recordLatencySample(
       command = "playerplay",

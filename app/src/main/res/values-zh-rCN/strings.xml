@@ -25,6 +25,7 @@
   <string name="tab_diagnostics">诊断</string>
   <string name="tab_diagnostics_subtitle">Bridge 实际发生过的事件记录。</string>
   <string name="service_ready">已准备好接受连接</string>
+  <string name="service_restarting">正在重新启动：关闭监听器</string>
   <string name="service_stopped">服务已停止</string>
   <string name="connection_active">当前有 MBRC 主端连接。</string>
   <string name="connection_none">当前没有 MBRC 主端连接。</string>
@@ -53,6 +54,7 @@
   <string name="restart_bridge">重新启动 Bridge</string>
   <string name="stop_bridge">停止 Bridge</string>
   <string name="listener">监听器</string>
+  <string name="listener_restarting">正在关闭</string>
   <string name="client">主端</string>
   <string name="playback">播放</string>
   <string name="position_sync">位置同步</string>

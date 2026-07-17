@@ -25,6 +25,7 @@
   <string name="tab_diagnostics">진단</string>
   <string name="tab_diagnostics_subtitle">Bridge에서 실제로 발생한 이벤트입니다.</string>
   <string name="service_ready">연결을 받을 준비가 되었습니다</string>
+  <string name="service_restarting">다시 시작 중: 리스너를 종료하고 있습니다</string>
   <string name="service_stopped">서비스가 중지됨</string>
   <string name="connection_active">MBRC 컨트롤러가 연결되어 있습니다.</string>
   <string name="connection_none">연결된 MBRC 컨트롤러가 없습니다.</string>
@@ -53,6 +54,7 @@
   <string name="restart_bridge">Bridge 다시 시작</string>
   <string name="stop_bridge">Bridge 중지</string>
   <string name="listener">리스너</string>
+  <string name="listener_restarting">종료 중</string>
   <string name="client">컨트롤러</string>
   <string name="playback">재생</string>
   <string name="position_sync">위치 동기화</string>

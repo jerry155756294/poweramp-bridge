@@ -13,6 +13,31 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
+internal data class LocalAddressCandidate(
+  val interfaceName: String,
+  val address: String
+)
+
+/** Puts the address most likely to work for a nearby controller at the top. */
+internal fun prioritizeLocalAddresses(candidates: Collection<LocalAddressCandidate>): List<String> =
+  candidates
+    .distinctBy(LocalAddressCandidate::address)
+    .sortedWith(
+      compareBy<LocalAddressCandidate> { candidate ->
+        val isWifi = candidate.interfaceName.contains("wlan", ignoreCase = true) ||
+          candidate.interfaceName.contains("wifi", ignoreCase = true)
+        val ipv4 = runCatching { java.net.InetAddress.getByName(candidate.address) as? Inet4Address }
+          .getOrNull()
+        when {
+          isWifi && ipv4?.isSiteLocalAddress == true -> 0
+          ipv4?.isSiteLocalAddress == true -> 1
+          ipv4 != null -> 2
+          else -> 3
+        }
+      }.thenBy { it.address }
+    )
+    .map(LocalAddressCandidate::address)
+
 class NetworkAddressMonitor(
   context: Context,
   private val stateRepository: BridgeStateRepository
@@ -65,7 +90,7 @@ class NetworkAddressMonitor(
   }
 
   internal fun resolveLocalAddresses(): List<String> {
-    val addresses = linkedSetOf<String>()
+    val addresses = mutableListOf<LocalAddressCandidate>()
     val interfaces = runCatching { NetworkInterface.getNetworkInterfaces() }.getOrNull() ?: return emptyList()
 
     while (interfaces.hasMoreElements()) {
@@ -87,12 +112,10 @@ class NetworkAddressMonitor(
         }
         if (hostAddress.isNullOrBlank()) continue
 
-        addresses += "${networkInterface.displayName}: $hostAddress"
+        addresses += LocalAddressCandidate(networkInterface.name, hostAddress)
       }
     }
 
-    return addresses.toList().sortedWith(
-      compareBy<String> { !it.contains('.') }.thenBy { it }
-    )
+    return prioritizeLocalAddresses(addresses)
   }
 }

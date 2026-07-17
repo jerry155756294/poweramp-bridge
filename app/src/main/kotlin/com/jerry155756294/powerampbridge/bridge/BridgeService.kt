@@ -340,6 +340,7 @@ class BridgeService : Service() {
     }
 
     manualStopRequested = false
+    app.appContainer.stateRepository.markServiceRestarting()
     lifecycleGeneration += 1L
     listenerStartJob?.cancel()
     restartJob?.cancel()
@@ -350,6 +351,7 @@ class BridgeService : Service() {
         }
 
         val generation = lifecycleGeneration
+        val restartStartedAt = SystemClock.elapsedRealtime()
         app.appContainer.stateRepository.recordProtocolEvent(
           "listener_restart_begin:generation=$generation"
         )
@@ -366,6 +368,10 @@ class BridgeService : Service() {
         }
         startedPort = null
         app.appContainer.stateRepository.setListenerState(false, activeSettings.port)
+        delay(
+          (RESTART_STATUS_MINIMUM_MS - (SystemClock.elapsedRealtime() - restartStartedAt))
+            .coerceAtLeast(0L)
+        )
         observeSettings()
         app.appContainer.stateRepository.recordProtocolEvent(
           "listener_restart_observing:generation=$generation"
@@ -840,6 +846,7 @@ class BridgeService : Service() {
     private const val LATENCY_CONFIRMATION_TIMEOUT_MS = 1500L
     private const val SLOW_REQUEST_MS = 250L
     private const val VERY_SLOW_REQUEST_MS = 1000L
+    private const val RESTART_STATUS_MINIMUM_MS = 350L
     private const val ACTION_STOP = "com.jerry155756294.powerampbridge.action.STOP"
     private const val ACTION_RESTART = "com.jerry155756294.powerampbridge.action.RESTART"
 

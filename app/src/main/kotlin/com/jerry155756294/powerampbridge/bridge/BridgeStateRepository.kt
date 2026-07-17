@@ -23,6 +23,23 @@ class BridgeStateRepository {
     }
   }
 
+  /**
+   * Makes an in-process listener restart visible to the UI before the old socket is closed.
+   * The state is cleared only after the replacement listener has bound successfully.
+   */
+  fun markServiceRestarting() {
+    Timber.i("Service restart requested")
+    _state.update {
+      it.copy(
+        serviceRunning = true,
+        serviceStopping = true,
+        manualStopActive = false,
+        serviceStopSummary = "Bridge 正在重新啟動",
+        serviceStopDetail = "正在關閉目前的監聽器，接著會重新準備接受連線。"
+      )
+    }
+  }
+
   fun markManualStopRequested() {
     Timber.i("Manual stop requested")
     _state.update {
@@ -70,7 +87,15 @@ class BridgeStateRepository {
   }
 
   fun setListenerState(active: Boolean, port: Int) {
-    _state.update { it.copy(listenerActive = active, listenPort = port) }
+    _state.update {
+      it.copy(
+        listenerActive = active,
+        listenPort = port,
+        serviceStopping = if (active) false else it.serviceStopping,
+        serviceStopSummary = if (active) null else it.serviceStopSummary,
+        serviceStopDetail = if (active) null else it.serviceStopDetail
+      )
+    }
   }
 
   fun setLocalAddresses(addresses: List<String>) {

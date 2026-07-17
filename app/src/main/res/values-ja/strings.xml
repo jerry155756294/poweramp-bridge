@@ -25,6 +25,7 @@
   <string name="tab_diagnostics">診断</string>
   <string name="tab_diagnostics_subtitle">Bridge で実際に発生したイベント。</string>
   <string name="service_ready">接続を受け付ける準備ができました</string>
+  <string name="service_restarting">再起動中：リスナーを停止しています</string>
   <string name="service_stopped">サービスは停止中</string>
   <string name="connection_active">MBRC コントローラーが接続されています。</string>
   <string name="connection_none">MBRC コントローラーは接続されていません。</string>
@@ -53,6 +54,7 @@
   <string name="restart_bridge">Bridge を再起動</string>
   <string name="stop_bridge">Bridge を停止</string>
   <string name="listener">リスナー</string>
+  <string name="listener_restarting">停止中</string>
   <string name="client">コントローラー</string>
   <string name="playback">再生</string>
   <string name="position_sync">位置同期</string>

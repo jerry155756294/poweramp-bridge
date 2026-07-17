@@ -18,8 +18,7 @@ class BridgeSettingsRepository(
     BridgeSettings(
       port = preferences[Keys.Port]?.takeIf { it in 1..65535 } ?: 3000,
       startOnBoot = preferences[Keys.StartOnBoot] ?: false,
-      foregroundPersistent = preferences[Keys.ForegroundPersistent] ?: true,
-      advancedDiagnosticsEnabled = preferences[Keys.AdvancedDiagnosticsEnabled] ?: false
+      foregroundPersistent = preferences[Keys.ForegroundPersistent] ?: true
     )
   }
 
@@ -35,16 +34,10 @@ class BridgeSettingsRepository(
     context.dataStore.edit { it[Keys.ForegroundPersistent] = enabled }
   }
 
-  suspend fun updateAdvancedDiagnostics(enabled: Boolean) {
-    context.dataStore.edit { it[Keys.AdvancedDiagnosticsEnabled] = enabled }
-  }
-
   private object Keys {
     val Port: Preferences.Key<Int> = intPreferencesKey("port")
     val StartOnBoot: Preferences.Key<Boolean> = booleanPreferencesKey("start_on_boot")
     val ForegroundPersistent: Preferences.Key<Boolean> =
       booleanPreferencesKey("foreground_persistent")
-    val AdvancedDiagnosticsEnabled: Preferences.Key<Boolean> =
-      booleanPreferencesKey("advanced_diagnostics_enabled")
   }
 }
