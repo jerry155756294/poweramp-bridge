@@ -858,12 +858,15 @@ class BridgeService : Service() {
     }
 
     fun startOrRestart(context: Context, serviceRunning: Boolean) {
-      if (serviceRunning) {
+      if (requestedStartAction(serviceRunning) == ACTION_RESTART) {
         restart(context)
       } else {
         start(context)
       }
     }
+
+    internal fun requestedStartAction(serviceRunning: Boolean): String? =
+      if (serviceRunning) ACTION_RESTART else null
 
     fun restart(context: Context) {
       ContextCompat.startForegroundService(context, restartIntent(context))
