@@ -10,20 +10,18 @@ class BridgeStateRepositoryTest {
   private val repository = BridgeStateRepository()
 
   @Test
-  fun `manual stop blocks auto start until service starts again`() {
+  fun `service restart clears manual stop state`() {
     repository.markServiceStarted()
     repository.markManualStopRequested()
     repository.markServiceStopped()
 
     val stopped = repository.state.value
-    assertFalse(stopped.shouldAutoStart(autoStartEnabled = true))
     assertTrue(stopped.manualStopActive)
     assertEquals("已手動停止", stopped.serviceStopSummary)
 
     repository.markServiceStarted()
 
     val restarted = repository.state.value
-    assertFalse(restarted.shouldAutoStart(autoStartEnabled = true))
     assertFalse(restarted.manualStopActive)
     assertNull(restarted.serviceStopSummary)
   }

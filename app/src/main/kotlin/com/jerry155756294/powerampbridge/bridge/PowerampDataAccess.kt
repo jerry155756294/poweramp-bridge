@@ -2,87 +2,95 @@ package com.jerry155756294.powerampbridge.bridge
 
 import android.content.Context
 import android.content.Intent
-import android.os.SystemClock
 import com.maxmpz.poweramp.player.PowerampAPI
 import com.maxmpz.poweramp.player.PowerampAPIHelper
 import com.maxmpz.poweramp.player.TableDefs
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
-/** Requests Poweramp's one-time grant for its ContentProvider-backed library data. */
+/** Keeps requesting and probing Poweramp's library grant until the provider is readable. */
 object PowerampDataAccess {
-  private const val REQUEST_COOLDOWN_MS = 30_000L
-  private const val INITIAL_PROBE_DELAY_MS = 750L
-  private const val RETRY_PROBE_DELAY_MS = 2_000L
-  private val lastRequestAtMs = AtomicLong(0L)
+  private const val RETRY_INTERVAL_MS = 1_500L
+  private const val LOG_EVERY_ATTEMPTS = 20
   private val probeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+  private val granted = AtomicBoolean(false)
+  private var retryJob: Job? = null
+  private var appContext: Context? = null
+  private var repository: BridgeStateRepository? = null
 
-  fun request(context: Context, stateRepository: BridgeStateRepository): Boolean {
-    val powerampPackage = PowerampAPIHelper.getPowerampPackageName(context)
-    if (powerampPackage == null) {
-      stateRepository.setPowerampDataAccess(
-        PowerampDataAccessStatus.FAILED,
-        "找不到 Poweramp，無法要求資料存取權。"
-      )
-      return false
+  @Synchronized
+  fun start(context: Context, stateRepository: BridgeStateRepository) {
+    appContext = context.applicationContext
+    repository = stateRepository
+    if (!granted.get()) startRetryLoop()
+  }
+
+  @Synchronized
+  fun stop() {
+    retryJob?.cancel()
+    retryJob = null
+  }
+
+  @Synchronized
+  fun markAvailable() {
+    if (granted.compareAndSet(false, true)) {
+      repository?.recordPowerampEvent("data_access_confirmed")
     }
+  }
 
-    val now = SystemClock.elapsedRealtime()
-    val lastRequestAt = lastRequestAtMs.getAndSet(now)
-    if (now - lastRequestAt < REQUEST_COOLDOWN_MS) {
-      stateRepository.setPowerampDataAccess(
-        PowerampDataAccessStatus.REQUESTED,
-        "已送出資料存取要求，正在驗證 Poweramp 的廣播清單。"
-      )
-      stateRepository.recordPowerampEvent("data_access_permission_request_throttled")
-      return true
+  @Synchronized
+  fun markUnavailable() {
+    if (granted.compareAndSet(true, false)) {
+      repository?.recordPowerampEvent("data_access_lost_retrying")
     }
+    if (appContext != null && repository != null) startRetryLoop()
+  }
 
-    return runCatching {
+  @Synchronized
+  private fun startRetryLoop() {
+    if (retryJob?.isActive == true || granted.get()) return
+    val context = appContext ?: return
+    val stateRepository = repository ?: return
+    retryJob = probeScope.launch {
+      var attempts = 0
+      while (isActive && !granted.get()) {
+        attempts += 1
+        if (probe(context)) {
+          markAvailable()
+          break
+        }
+        requestPermission(context)
+        if (attempts == 1 || attempts % LOG_EVERY_ATTEMPTS == 0) {
+          stateRepository.recordPowerampEvent("data_access_retry:attempt=$attempts")
+        }
+        delay(RETRY_INTERVAL_MS)
+      }
+    }
+  }
+
+  private fun requestPermission(context: Context) {
+    val powerampPackage = PowerampAPIHelper.getPowerampPackageName(context) ?: return
+    runCatching {
       context.sendBroadcast(
         Intent(PowerampAPI.ACTION_ASK_FOR_DATA_PERMISSION)
           .setPackage(powerampPackage)
           .putExtra(PowerampAPI.EXTRA_PACKAGE, context.packageName)
       )
-      stateRepository.setPowerampDataAccess(
-        PowerampDataAccessStatus.REQUESTED,
-        "已向 Poweramp 要求資料存取權，正在驗證廣播清單。"
-      )
-      stateRepository.recordPowerampEvent("data_access_permission_requested")
-      verifyAfterRequest(context.applicationContext, stateRepository)
-      true
     }.onFailure { error ->
       Timber.w(error, "Failed requesting Poweramp data access")
-      stateRepository.setPowerampDataAccess(
-        PowerampDataAccessStatus.FAILED,
-        "無法要求 Poweramp 資料存取權：${error.javaClass.simpleName}"
-      )
-      stateRepository.recordPowerampEvent(
-        "data_access_permission_request_failed:${error.javaClass.simpleName}:${error.message ?: "no-message"}"
-      )
-    }.getOrDefault(false)
-  }
-
-  private fun verifyAfterRequest(context: Context, stateRepository: BridgeStateRepository) {
-    probeScope.launch {
-      delay(INITIAL_PROBE_DELAY_MS)
-      if (!probe(context, stateRepository)) {
-        delay(RETRY_PROBE_DELAY_MS)
-        probe(context, stateRepository)
-      }
     }
   }
 
-  private fun probe(context: Context, stateRepository: BridgeStateRepository): Boolean {
+  private fun probe(context: Context): Boolean {
+    if (PowerampAPIHelper.getPowerampPackageName(context) == null) return false
     val uri = PowerampAPI.ROOT_URI.buildUpon()
-      // Probe the same minimal category query used by the library sync. The
-      // streams collection is optional and some Poweramp builds return a null
-      // cursor for it even when library access is already granted.
       .appendEncodedPath("albums")
       .build()
     return runCatching {
@@ -95,23 +103,10 @@ object PowerampDataAccess {
           TableDefs.Albums.ALBUM
         )
       ) { "Poweramp did not return a cursor for /albums" }.use { cursor ->
-        stateRepository.recordProtocolEvent("data_access_probe_rows:${cursor.count}")
+        repository?.recordProtocolEvent("data_access_probe_rows:${cursor.count}")
       }
-      stateRepository.setPowerampDataAccess(
-        PowerampDataAccessStatus.AVAILABLE,
-        "已確認可讀取 Poweramp 的廣播清單。"
-      )
-      stateRepository.recordPowerampEvent("data_access_probe_success")
+      repository?.recordPowerampEvent("data_access_probe_success")
       true
-    }.onFailure { error ->
-      Timber.w(error, "Poweramp data access probe failed")
-      stateRepository.setPowerampDataAccess(
-        PowerampDataAccessStatus.FAILED,
-        "Poweramp 未授與資料存取權：${error.javaClass.simpleName}。請先開啟 Poweramp，再重新要求。"
-      )
-      stateRepository.recordPowerampEvent(
-        "data_access_probe_failed:${error.javaClass.simpleName}:${error.message ?: "no-message"}"
-      )
     }.getOrDefault(false)
   }
 }

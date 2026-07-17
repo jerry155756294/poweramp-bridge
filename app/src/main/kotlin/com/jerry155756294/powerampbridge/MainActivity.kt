@@ -47,7 +47,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,9 +68,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.jerry155756294.powerampbridge.bridge.BridgeService
 import com.jerry155756294.powerampbridge.bridge.BridgeUiState
 import com.jerry155756294.powerampbridge.bridge.LogEntry
-import com.jerry155756294.powerampbridge.bridge.PowerampDataAccess
-import com.jerry155756294.powerampbridge.bridge.PowerampDataAccessStatus
-import com.jerry155756294.powerampbridge.bridge.shouldAutoStart
 import com.jerry155756294.powerampbridge.data.BridgeSettings
 import com.jerry155756294.powerampbridge.data.BridgeSettingsRepository
 import com.jerry155756294.powerampbridge.ui.BridgeTheme
@@ -101,14 +97,12 @@ class MainActivity : ComponentActivity() {
             state = app.appContainer.stateRepository.state,
             settingsRepository = app.appContainer.settingsRepository,
             onStart = { BridgeService.start(this) },
-            onStop = { BridgeService.stop(this) },
-            onRequestPowerampDataAccess = {
-              PowerampDataAccess.request(this, app.appContainer.stateRepository)
-            }
+            onStop = { BridgeService.stop(this) }
           )
         }
       }
     }
+    BridgeService.start(this)
   }
 }
 
@@ -117,16 +111,11 @@ private fun BridgeApp(
   state: StateFlow<BridgeUiState>,
   settingsRepository: BridgeSettingsRepository,
   onStart: () -> Unit,
-  onStop: () -> Unit,
-  onRequestPowerampDataAccess: () -> Boolean
+  onStop: () -> Unit
 ) {
   val uiState by state.collectAsStateWithLifecycle()
   val settings by settingsRepository.settings.collectAsStateWithLifecycle(initialValue = BridgeSettings())
   var selectedDestination by remember { mutableStateOf(BridgeDestination.Connect) }
-
-  LaunchedEffect(settings.autoStart, uiState.serviceRunning, uiState.serviceStopping, uiState.manualStopActive) {
-    if (uiState.shouldAutoStart(settings.autoStart)) onStart()
-  }
 
   Scaffold(
     containerColor = MaterialTheme.colorScheme.background,
@@ -150,7 +139,6 @@ private fun BridgeApp(
         settings = settings,
         onStart = onStart,
         onStop = onStop,
-        onRequestPowerampDataAccess = onRequestPowerampDataAccess,
         repository = settingsRepository,
         modifier = Modifier.padding(padding)
       )
@@ -285,7 +273,6 @@ private fun SettingsTab(
   settings: BridgeSettings,
   onStart: () -> Unit,
   onStop: () -> Unit,
-  onRequestPowerampDataAccess: () -> Boolean,
   repository: BridgeSettingsRepository,
   modifier: Modifier = Modifier
 ) {
@@ -326,20 +313,13 @@ private fun SettingsTab(
     }
 
     SectionCard(stringResource(R.string.settings_service_title)) {
-      SettingSwitch(stringResource(R.string.settings_auto_start), settings.autoStart) {
-        scope.launch { repository.updateAutoStart(it) }
-      }
       SettingSwitch(stringResource(R.string.settings_start_on_boot), settings.startOnBoot) {
         scope.launch { repository.updateStartOnBoot(it) }
       }
-      Text(stringResource(R.string.settings_start_explanation), style = MaterialTheme.typography.bodySmall)
       SettingSwitch(stringResource(R.string.settings_foreground_persistent), settings.foregroundPersistent) {
         scope.launch { repository.updateForegroundPersistent(it) }
       }
       Text(stringResource(R.string.settings_foreground_explanation), style = MaterialTheme.typography.bodySmall)
-      SettingSwitch(stringResource(R.string.settings_minimal_diagnostics), settings.minimalForegroundNotification) {
-        scope.launch { repository.updateMinimalForegroundNotification(it) }
-      }
       SettingSwitch(stringResource(R.string.settings_advanced_diagnostics), settings.advancedDiagnosticsEnabled) {
         scope.launch { repository.updateAdvancedDiagnostics(it) }
       }
@@ -349,16 +329,6 @@ private fun SettingsTab(
       )
     }
 
-    PowerampDataAccessCard(
-      status = uiState.powerampDataAccess,
-      detail = uiState.powerampDataAccessDetail,
-      hasRequestedBefore = settings.powerampDataAccessPermissionRequested,
-      onRequest = {
-        if (onRequestPowerampDataAccess()) {
-          scope.launch { repository.markPowerampDataAccessPermissionRequested() }
-        }
-      }
-    )
     BatteryOptimizationCard()
     ServiceActionRow(uiState.serviceRunning, onStart, onStop)
   }
@@ -634,50 +604,6 @@ private fun Context.requestBatteryOptimizationExemption() {
     .onFailure {
       startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(packageUri))
     }
-}
-
-@Composable
-private fun PowerampDataAccessCard(
-  status: PowerampDataAccessStatus,
-  detail: String?,
-  hasRequestedBefore: Boolean,
-  onRequest: () -> Unit
-) {
-  val statusRes: Int
-  val summaryRes: Int
-  when (status) {
-    PowerampDataAccessStatus.AVAILABLE -> {
-      statusRes = R.string.access_available
-      summaryRes = R.string.access_available_summary
-    }
-    PowerampDataAccessStatus.REQUESTED -> {
-      statusRes = R.string.access_requested
-      summaryRes = R.string.access_requested_summary
-    }
-    PowerampDataAccessStatus.FAILED -> {
-      statusRes = R.string.access_failed
-      summaryRes = R.string.access_failed_summary
-    }
-    PowerampDataAccessStatus.NOT_REQUESTED -> {
-      statusRes = if (hasRequestedBefore) R.string.access_waiting else R.string.access_not_requested
-      summaryRes = if (hasRequestedBefore) R.string.access_waiting_summary else R.string.access_not_requested_summary
-    }
-  }
-
-  SectionCard(stringResource(R.string.poweramp_access_title)) {
-    StatusLine(stringResource(R.string.status), stringResource(statusRes))
-    // Runtime details are produced by the service and may contain implementation
-    // terms. Keep the user-facing explanation localized and stable here.
-    Text(stringResource(summaryRes), style = MaterialTheme.typography.bodySmall)
-    when (status) {
-      PowerampDataAccessStatus.NOT_REQUESTED,
-      PowerampDataAccessStatus.FAILED -> Button(onClick = onRequest, modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
-        Text(stringResource(if (status == PowerampDataAccessStatus.FAILED) R.string.request_again else R.string.request_access))
-      }
-      PowerampDataAccessStatus.REQUESTED -> Text(stringResource(R.string.access_waiting_body), style = MaterialTheme.typography.bodySmall)
-      PowerampDataAccessStatus.AVAILABLE -> Unit
-    }
-  }
 }
 
 private fun humanizeProtocolEvent(context: android.content.Context, message: String): String = when {

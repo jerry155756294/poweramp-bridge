@@ -213,7 +213,6 @@ class BridgeService : Service() {
     createNotificationChannel()
     stateRepository.markServiceStarted()
     notificationPresenter.foregroundPersistent = activeSettings.foregroundPersistent
-    notificationPresenter.minimalMode = activeSettings.minimalForegroundNotification
     val initialState = stateRepository.state.value
     lastNotificationSnapshot = notificationPresenter.snapshot(initialState)
     ServiceCompat.startForeground(
@@ -267,11 +266,6 @@ class BridgeService : Service() {
       app.appContainer.settingsRepository.settings.collectLatest { settings ->
         activeSettings = settings
         notificationPresenter.foregroundPersistent = settings.foregroundPersistent
-        notificationPresenter.minimalMode = settings.minimalForegroundNotification
-        if (!settings.powerampDataAccessPermissionRequested) {
-          powerampGateway.requestDataAccessPermission()
-          app.appContainer.settingsRepository.markPowerampDataAccessPermissionRequested()
-        }
         lastObservedState?.let { state ->
           val notificationSnapshot = notificationPresenter.snapshot(state)
           if (notificationSnapshot != lastNotificationSnapshot) {

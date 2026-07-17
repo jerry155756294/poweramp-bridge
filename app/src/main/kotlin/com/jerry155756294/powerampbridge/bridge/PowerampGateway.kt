@@ -115,6 +115,7 @@ class PowerampGateway(
   fun start() {
     if (registered) return
     refreshAvailability()
+    PowerampDataAccess.start(context, stateRepository)
     val filter = IntentFilter().apply {
       addAction(ACTION_VOLUME_CHANGED)
       addAction(PowerampAPI.ACTION_TRACK_CHANGED)
@@ -153,6 +154,7 @@ class PowerampGateway(
     registered = false
     coverLoadJob?.cancel()
     audioDeviceRefreshJob?.cancel()
+    PowerampDataAccess.stop()
   }
 
   fun refreshAvailability(): Boolean {
@@ -163,9 +165,6 @@ class PowerampGateway(
     stateRepository.setPowerampAvailable(available)
     return available
   }
-
-  fun requestDataAccessPermission(): Boolean =
-    PowerampDataAccess.request(context, stateRepository)
 
   fun requestPositionSync() {
     sendCommand(PowerampAPI.Commands.POS_SYNC)
@@ -460,13 +459,13 @@ class PowerampGateway(
             } while (size < limit && cursor.moveToNext())
           }
         }
-        stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.AVAILABLE)
+        PowerampDataAccess.markAvailable()
         stateRepository.recordProtocolEvent("library_reply:$libraryContext total=$total offset=$offset count=${data.size}")
         PowerampLibraryPage(total, offset, limit, data)
       } ?: unavailableLibraryPage(offset, limit, "null_cursor")
     }.onFailure { error ->
       Timber.w(error, "Poweramp library query failed: %s", libraryContext)
-      stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.FAILED, error.javaClass.simpleName)
+      PowerampDataAccess.markUnavailable()
       stateRepository.recordPowerampEvent("Library query failed $libraryContext: ${error.javaClass.simpleName}")
     }.getOrElse { unavailableLibraryPage(offset, limit, it.javaClass.simpleName) }
   }
@@ -509,7 +508,7 @@ class PowerampGateway(
             } while (size < limit && cursor.moveToNext())
           }
         }
-        stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.AVAILABLE)
+        PowerampDataAccess.markAvailable()
         stateRepository.recordProtocolEvent(
           "playlist_reply total=$total offset=$offset count=${data.size}"
         )
@@ -517,10 +516,7 @@ class PowerampGateway(
       } ?: unavailablePlaylistPage(offset, limit, "null_cursor")
     }.onFailure { error ->
       Timber.w(error, "Poweramp playlist query failed")
-      stateRepository.setPowerampDataAccess(
-        PowerampDataAccessStatus.FAILED,
-        error.javaClass.simpleName
-      )
+      PowerampDataAccess.markUnavailable()
       stateRepository.recordPowerampEvent(
         "Playlist query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
       )
@@ -1221,14 +1217,11 @@ class PowerampGateway(
           }
         }
       }?.also {
-        stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.AVAILABLE)
+        PowerampDataAccess.markAvailable()
       } ?: emptyList()
     }.onFailure { error ->
       Timber.w(error, "Failed querying Poweramp queue")
-      stateRepository.setPowerampDataAccess(
-        PowerampDataAccessStatus.FAILED,
-        "無法讀取 Poweramp 清單：${error.javaClass.simpleName}"
-      )
+      PowerampDataAccess.markUnavailable()
       stateRepository.recordPowerampEvent(
         "Queue query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
       )
@@ -1310,14 +1303,11 @@ class PowerampGateway(
           }
         }
       }?.also {
-        stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.AVAILABLE)
+        PowerampDataAccess.markAvailable()
       }?.normalizeRadioStations() ?: emptyList()
     }.onFailure { error ->
       Timber.w(error, "Failed querying Poweramp streams")
-      stateRepository.setPowerampDataAccess(
-        PowerampDataAccessStatus.FAILED,
-        "無法讀取 Poweramp 廣播清單：${error.javaClass.simpleName}"
-      )
+      PowerampDataAccess.markUnavailable()
       stateRepository.recordPowerampEvent(
         "Radio query failed: ${error.javaClass.simpleName}:${error.message ?: "no-message"}"
       )
@@ -1454,7 +1444,7 @@ class PowerampGateway(
           }
         }
       }?.also {
-        stateRepository.setPowerampDataAccess(PowerampDataAccessStatus.AVAILABLE)
+        PowerampDataAccess.markAvailable()
       }?.normalizeRadioStations() ?: emptyList()
     }.onFailure { error ->
       Timber.w(error, "Failed querying Poweramp URL files")
