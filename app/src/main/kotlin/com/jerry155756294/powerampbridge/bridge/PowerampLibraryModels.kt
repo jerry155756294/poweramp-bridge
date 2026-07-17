@@ -66,6 +66,32 @@ internal object QueuePlaybackPlanner {
   }
 }
 
+/**
+ * Builds a replacement queue without changing the current playback command.
+ *
+ * Poweramp's queue provider does not expose an insert-at-position operation, so the bridge
+ * preserves the existing file IDs and writes the requested order back as one queue update.
+ */
+internal object QueueInsertionPlanner {
+  fun queueNext(
+    existingFileIds: List<Long>,
+    currentFileId: Long,
+    addedFileIds: List<Long>
+  ): List<Long>? {
+    if (currentFileId <= 0L || addedFileIds.isEmpty()) return null
+    val currentIndex = existingFileIds.indexOf(currentFileId)
+    if (currentIndex < 0) return null
+    return buildList(existingFileIds.size + addedFileIds.size) {
+      addAll(existingFileIds.take(currentIndex + 1))
+      addAll(addedFileIds)
+      addAll(existingFileIds.drop(currentIndex + 1))
+    }
+  }
+
+  fun queueLast(existingFileIds: List<Long>, addedFileIds: List<Long>): List<Long>? =
+    addedFileIds.takeIf { it.isNotEmpty() }?.let { existingFileIds + it }
+}
+
 /** mbrc has one genre field per track; retain the same deterministic primary genre everywhere. */
 internal fun primaryGenre(first: String, second: String): String =
   sequenceOf(first, second)

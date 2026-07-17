@@ -1647,7 +1647,7 @@ class PowerampGateway(
       return QueueCommandResult(400, accepted = false, detail = "queue command rejected: empty data")
     }
 
-    if (normalizedType !in REPLACING_QUEUE_TYPES) {
+    if (normalizedType !in SUPPORTED_QUEUE_TYPES) {
       return QueueCommandResult(
         code = 501,
         accepted = false,
@@ -1656,6 +1656,24 @@ class PowerampGateway(
     }
 
     val resolvedTracks = paths.mapNotNull(::findLibraryTrackByPath)
+    if (normalizedType in INSERT_QUEUE_TYPES) {
+      if (resolvedTracks.size != paths.size) {
+        return QueueCommandResult(
+          code = 404,
+          accepted = false,
+          detail = "queue insert paths not fully resolved type=$normalizedType requested=${paths.size} resolved=${resolvedTracks.size}"
+        )
+      }
+      return updatePowerampQueue(
+        type = normalizedType,
+        addedTracks = resolvedTracks
+      ).also { result ->
+        if (result.accepted) {
+          stateRepository.signalQueueChanged("queue_command:type=$normalizedType strategy=queue_insert")
+        }
+      }
+    }
+
     val playbackPlan = QueuePlaybackPlanner.create(paths, playPath, resolvedTracks)
       ?: return QueueCommandResult(
         code = 404,
@@ -1679,6 +1697,46 @@ class PowerampGateway(
       )
     }
     return result
+  }
+
+  private fun updatePowerampQueue(
+    type: String,
+    addedTracks: List<PowerampLibraryTrackRef>
+  ): QueueCommandResult {
+    val existingItems = readQueueItems()
+    val existingFileIds = existingItems.map(PowerampQueueItem::fileId)
+    if (existingFileIds.any { it == null || it <= 0L }) {
+      return QueueCommandResult(
+        code = 409,
+        accepted = false,
+        detail = "queue insert rejected: existing queue contains a non-library item"
+      )
+    }
+
+    val updatedFileIds = when (type) {
+      "next" -> QueueInsertionPlanner.queueNext(
+        existingFileIds = existingFileIds.filterNotNull(),
+        currentFileId = stateRepository.state.value.playback.track.realId,
+        addedFileIds = addedTracks.map(PowerampLibraryTrackRef::fileId)
+      ) ?: return QueueCommandResult(
+        code = 409,
+        accepted = false,
+        detail = "queue next rejected: current track is not in the Poweramp queue"
+      )
+
+      "last" -> QueueInsertionPlanner.queueLast(
+        existingFileIds = existingFileIds.filterNotNull(),
+        addedFileIds = addedTracks.map(PowerampLibraryTrackRef::fileId)
+      ) ?: return QueueCommandResult(400, accepted = false, detail = "queue last rejected: empty data")
+
+      else -> return QueueCommandResult(501, accepted = false, detail = "queue insert unsupported: type=$type")
+    }
+
+    return replacePowerampQueue(
+      fileIds = updatedFileIds,
+      type = type,
+      strategy = "queue_insert"
+    )
   }
 
   override fun seekTo(positionMs: Long): Boolean {
@@ -1777,6 +1835,20 @@ class PowerampGateway(
     targetTrack: PowerampLibraryTrackRef,
     type: String
   ): QueueCommandResult {
+    return replacePowerampQueue(
+      fileIds = tracks.map(PowerampLibraryTrackRef::fileId),
+      type = type,
+      strategy = "rebuild_queue",
+      playFileId = targetTrack.fileId
+    )
+  }
+
+  private fun replacePowerampQueue(
+    fileIds: List<Long>,
+    type: String,
+    strategy: String,
+    playFileId: Long? = null
+  ): QueueCommandResult {
     val queueUri = PowerampAPI.ROOT_URI.buildUpon().appendEncodedPath("queue").build()
     val cleared = runCatching {
       context.contentResolver.delete(queueUri, null, null)
@@ -1792,44 +1864,44 @@ class PowerampGateway(
 
     var sort = 1
     val inserted = buildList {
-      tracks.forEach { track ->
+      fileIds.forEach { fileId ->
         val values = ContentValues().apply {
-          put(TableDefs.Queue.FOLDER_FILE_ID.substringAfterLast('.'), track.fileId)
+          put(TableDefs.Queue.FOLDER_FILE_ID.substringAfterLast('.'), fileId)
           put(TableDefs.Queue.SORT.substringAfterLast('.'), sort++)
         }
         context.contentResolver.insert(queueUri, values)?.let { entryUri ->
-          add(track.source to entryUri)
+          add(fileId to entryUri)
         }
       }
     }
-    if (inserted.size != tracks.size) {
+    if (inserted.size != fileIds.size) {
       return QueueCommandResult(
         500,
         accepted = false,
-        detail = "queue replace insert failed requested=${tracks.size} inserted=${inserted.size}"
+        detail = "queue replace insert failed requested=${fileIds.size} inserted=${inserted.size}"
       )
     }
     notifyPowerampQueueChanged()
-    val target = inserted.firstOrNull { (path, _) ->
-      path.equals(targetTrack.source, ignoreCase = true)
-    }?.second ?: inserted.first().second
-    val accepted = openToPlay(target)
-    if (accepted) {
+    val target = playFileId?.let { requestedFileId ->
+      inserted.firstOrNull { (fileId, _) -> fileId == requestedFileId }?.second
+    }
+    val accepted = target?.let(::openToPlay) ?: true
+    if (target != null && accepted) {
       val entryId = target.lastPathSegment?.toLongOrNull() ?: 0L
       setActivePlaybackCategory(
         queueUri,
         entryId,
-        "queue_command:rebuild_queue",
+        "queue_command:$strategy",
         signalChange = false
       )
     }
     stateRepository.recordPowerampEvent(
-      "Queue replace: type=$type cleared=$cleared requested=${tracks.size} inserted=${inserted.size} accepted=$accepted"
+      "Queue replace: type=$type strategy=$strategy cleared=$cleared requested=${fileIds.size} inserted=${inserted.size} accepted=$accepted"
     )
     return QueueCommandResult(
       if (accepted) 200 else 500,
       accepted,
-      "queue command type=$type inserted=${inserted.size}"
+      "queue command type=$type strategy=$strategy inserted=${inserted.size}"
     )
   }
 
@@ -2739,7 +2811,9 @@ class PowerampGateway(
     const val LIBRARY_COVER_JPEG_QUALITY = 80
     const val LIBRARY_IDENTITY_PREFERENCES = "bridge_library_identity"
     const val LIBRARY_SOURCE_ID_KEY = "library_source_id"
-    val REPLACING_QUEUE_TYPES = setOf("now", "default", "next", "last", "add-all")
+    val PLAY_NOW_QUEUE_TYPES = setOf("now", "default", "add-all")
+    val INSERT_QUEUE_TYPES = setOf("next", "last")
+    val SUPPORTED_QUEUE_TYPES = PLAY_NOW_QUEUE_TYPES + INSERT_QUEUE_TYPES
   }
 }
 

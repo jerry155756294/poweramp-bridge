@@ -67,6 +67,38 @@ class QueuePlaybackPlannerTest {
   }
 
   @Test
+  fun `queue next inserts directly after current queue item`() {
+    val updated = QueueInsertionPlanner.queueNext(
+      existingFileIds = listOf(10L, 20L, 30L),
+      currentFileId = 20L,
+      addedFileIds = listOf(40L, 50L)
+    )
+
+    assertEquals(listOf(10L, 20L, 40L, 50L, 30L), updated)
+  }
+
+  @Test
+  fun `queue next does not mutate a queue that lacks the current track`() {
+    val updated = QueueInsertionPlanner.queueNext(
+      existingFileIds = listOf(10L, 20L),
+      currentFileId = 99L,
+      addedFileIds = listOf(40L)
+    )
+
+    assertNull(updated)
+  }
+
+  @Test
+  fun `queue last appends without changing earlier items`() {
+    val updated = QueueInsertionPlanner.queueLast(
+      existingFileIds = listOf(10L, 20L),
+      addedFileIds = listOf(30L, 40L)
+    )
+
+    assertEquals(listOf(10L, 20L, 30L, 40L), updated)
+  }
+
+  @Test
   fun `genre mapper retains alphabetically first primary genre`() {
     assertEquals("Ambient", primaryGenre("Rock", "Ambient"))
     assertEquals("Jazz", primaryGenre("", "Jazz"))
