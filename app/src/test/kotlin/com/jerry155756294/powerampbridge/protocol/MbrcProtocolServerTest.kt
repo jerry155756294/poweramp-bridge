@@ -1,11 +1,11 @@
 package com.jerry155756294.powerampbridge.protocol
 
-import java.net.ServerSocket
-import java.net.Socket
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.net.ServerSocket
+import java.net.Socket
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -137,7 +137,7 @@ class MbrcProtocolServerTest {
     try {
       val writer = BufferedWriter(OutputStreamWriter(client.getOutputStream()))
       val reader = BufferedReader(InputStreamReader(client.getInputStream()))
-      writer.write("{\"context\":\"verifyconnection\",\"data\":null}\\r\\n")
+      writer.write("{\"context\":\"verifyconnection\",\"data\":null}\r\n")
       writer.flush()
 
       val reply = JsonMessageCodec().parse(withTimeout(1_000) { reader.readLine() })
