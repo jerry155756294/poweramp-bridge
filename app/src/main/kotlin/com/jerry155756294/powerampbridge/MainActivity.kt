@@ -1,8 +1,13 @@
 package com.jerry155756294.powerampbridge
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -41,7 +46,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,12 +62,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.jerry155756294.powerampbridge.bridge.BridgeService
 import com.jerry155756294.powerampbridge.bridge.BridgeUiState
 import com.jerry155756294.powerampbridge.bridge.LogEntry
-import com.jerry155756294.powerampbridge.bridge.PowerampDataAccess
-import com.jerry155756294.powerampbridge.bridge.PowerampDataAccessStatus
-import com.jerry155756294.powerampbridge.bridge.shouldAutoStart
 import com.jerry155756294.powerampbridge.data.BridgeSettings
 import com.jerry155756294.powerampbridge.data.BridgeSettingsRepository
 import com.jerry155756294.powerampbridge.ui.BridgeTheme
@@ -92,14 +97,12 @@ class MainActivity : ComponentActivity() {
             state = app.appContainer.stateRepository.state,
             settingsRepository = app.appContainer.settingsRepository,
             onStart = { BridgeService.start(this) },
-            onStop = { BridgeService.stop(this) },
-            onRequestPowerampDataAccess = {
-              PowerampDataAccess.request(this, app.appContainer.stateRepository)
-            }
+            onStop = { BridgeService.stop(this) }
           )
         }
       }
     }
+    BridgeService.start(this)
   }
 }
 
@@ -108,16 +111,11 @@ private fun BridgeApp(
   state: StateFlow<BridgeUiState>,
   settingsRepository: BridgeSettingsRepository,
   onStart: () -> Unit,
-  onStop: () -> Unit,
-  onRequestPowerampDataAccess: () -> Boolean
+  onStop: () -> Unit
 ) {
   val uiState by state.collectAsStateWithLifecycle()
   val settings by settingsRepository.settings.collectAsStateWithLifecycle(initialValue = BridgeSettings())
   var selectedDestination by remember { mutableStateOf(BridgeDestination.Connect) }
-
-  LaunchedEffect(settings.autoStart, uiState.serviceRunning, uiState.serviceStopping, uiState.manualStopActive) {
-    if (uiState.shouldAutoStart(settings.autoStart)) onStart()
-  }
 
   Scaffold(
     containerColor = MaterialTheme.colorScheme.background,
@@ -141,7 +139,6 @@ private fun BridgeApp(
         settings = settings,
         onStart = onStart,
         onStop = onStop,
-        onRequestPowerampDataAccess = onRequestPowerampDataAccess,
         repository = settingsRepository,
         modifier = Modifier.padding(padding)
       )
@@ -276,7 +273,6 @@ private fun SettingsTab(
   settings: BridgeSettings,
   onStart: () -> Unit,
   onStop: () -> Unit,
-  onRequestPowerampDataAccess: () -> Boolean,
   repository: BridgeSettingsRepository,
   modifier: Modifier = Modifier
 ) {
@@ -317,20 +313,13 @@ private fun SettingsTab(
     }
 
     SectionCard(stringResource(R.string.settings_service_title)) {
-      SettingSwitch(stringResource(R.string.settings_auto_start), settings.autoStart) {
-        scope.launch { repository.updateAutoStart(it) }
-      }
       SettingSwitch(stringResource(R.string.settings_start_on_boot), settings.startOnBoot) {
         scope.launch { repository.updateStartOnBoot(it) }
       }
-      Text(stringResource(R.string.settings_start_explanation), style = MaterialTheme.typography.bodySmall)
       SettingSwitch(stringResource(R.string.settings_foreground_persistent), settings.foregroundPersistent) {
         scope.launch { repository.updateForegroundPersistent(it) }
       }
       Text(stringResource(R.string.settings_foreground_explanation), style = MaterialTheme.typography.bodySmall)
-      SettingSwitch(stringResource(R.string.settings_minimal_diagnostics), settings.minimalForegroundNotification) {
-        scope.launch { repository.updateMinimalForegroundNotification(it) }
-      }
       SettingSwitch(stringResource(R.string.settings_advanced_diagnostics), settings.advancedDiagnosticsEnabled) {
         scope.launch { repository.updateAdvancedDiagnostics(it) }
       }
@@ -340,16 +329,7 @@ private fun SettingsTab(
       )
     }
 
-    PowerampDataAccessCard(
-      status = uiState.powerampDataAccess,
-      detail = uiState.powerampDataAccessDetail,
-      hasRequestedBefore = settings.powerampDataAccessPermissionRequested,
-      onRequest = {
-        if (onRequestPowerampDataAccess()) {
-          scope.launch { repository.markPowerampDataAccessPermissionRequested() }
-        }
-      }
-    )
+    BatteryOptimizationCard()
     ServiceActionRow(uiState.serviceRunning, onStart, onStop)
   }
 }
@@ -556,47 +536,74 @@ private fun StatusLine(label: String, value: String) {
 }
 
 @Composable
-private fun PowerampDataAccessCard(
-  status: PowerampDataAccessStatus,
-  detail: String?,
-  hasRequestedBefore: Boolean,
-  onRequest: () -> Unit
-) {
-  val statusRes: Int
-  val summaryRes: Int
-  when (status) {
-    PowerampDataAccessStatus.AVAILABLE -> {
-      statusRes = R.string.access_available
-      summaryRes = R.string.access_available_summary
+private fun BatteryOptimizationCard() {
+  val context = LocalContext.current
+  val lifecycleOwner = LocalLifecycleOwner.current
+  var isExempt by remember { mutableStateOf(context.isIgnoringBatteryOptimizations()) }
+
+  DisposableEffect(context, lifecycleOwner) {
+    val observer = LifecycleEventObserver { _, event ->
+      if (event == Lifecycle.Event.ON_RESUME) {
+        isExempt = context.isIgnoringBatteryOptimizations()
+      }
     }
-    PowerampDataAccessStatus.REQUESTED -> {
-      statusRes = R.string.access_requested
-      summaryRes = R.string.access_requested_summary
-    }
-    PowerampDataAccessStatus.FAILED -> {
-      statusRes = R.string.access_failed
-      summaryRes = R.string.access_failed_summary
-    }
-    PowerampDataAccessStatus.NOT_REQUESTED -> {
-      statusRes = if (hasRequestedBefore) R.string.access_waiting else R.string.access_not_requested
-      summaryRes = if (hasRequestedBefore) R.string.access_waiting_summary else R.string.access_not_requested_summary
-    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
   }
 
-  SectionCard(stringResource(R.string.poweramp_access_title)) {
-    StatusLine(stringResource(R.string.status), stringResource(statusRes))
-    // Runtime details are produced by the service and may contain implementation
-    // terms. Keep the user-facing explanation localized and stable here.
-    Text(stringResource(summaryRes), style = MaterialTheme.typography.bodySmall)
-    when (status) {
-      PowerampDataAccessStatus.NOT_REQUESTED,
-      PowerampDataAccessStatus.FAILED -> Button(onClick = onRequest, modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
-        Text(stringResource(if (status == PowerampDataAccessStatus.FAILED) R.string.request_again else R.string.request_access))
-      }
-      PowerampDataAccessStatus.REQUESTED -> Text(stringResource(R.string.access_waiting_body), style = MaterialTheme.typography.bodySmall)
-      PowerampDataAccessStatus.AVAILABLE -> Unit
+  SectionCard(stringResource(R.string.settings_background_title)) {
+    Text(
+      stringResource(
+        if (isExempt) R.string.settings_background_unrestricted else R.string.settings_background_restricted
+      ),
+      style = MaterialTheme.typography.titleSmall,
+      fontWeight = FontWeight.SemiBold
+    )
+    Text(
+      stringResource(
+        if (isExempt) {
+          R.string.settings_background_unrestricted_summary
+        } else {
+          R.string.settings_background_restricted_summary
+        }
+      ),
+      style = MaterialTheme.typography.bodySmall
+    )
+    Button(
+      onClick = {
+        context.requestBatteryOptimizationExemption()
+        isExempt = context.isIgnoringBatteryOptimizations()
+      },
+      modifier = Modifier.fillMaxWidth(),
+      shape = MaterialTheme.shapes.large
+    ) {
+      Text(
+        stringResource(
+          if (isExempt) R.string.settings_open_app_battery else R.string.settings_allow_unrestricted
+        )
+      )
     }
   }
+}
+
+private fun Context.isIgnoringBatteryOptimizations(): Boolean {
+  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+  return getSystemService(PowerManager::class.java)
+    ?.isIgnoringBatteryOptimizations(packageName)
+    ?: false
+}
+
+private fun Context.requestBatteryOptimizationExemption() {
+  val packageUri = Uri.parse("package:$packageName")
+  val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !isIgnoringBatteryOptimizations()) {
+    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).setData(packageUri)
+  } else {
+    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(packageUri)
+  }
+  runCatching { startActivity(intent) }
+    .onFailure {
+      startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(packageUri))
+    }
 }
 
 private fun humanizeProtocolEvent(context: android.content.Context, message: String): String = when {

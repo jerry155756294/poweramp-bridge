@@ -10,8 +10,6 @@ class BridgeNotificationPresenterTest {
     textResources = NotificationTextResources(
       bridgeTitle = "Bridge Running",
       bridgeStoppedTitle = "Bridge Stopped",
-      bridgeMinimalSummary = "Bridge active",
-      bridgeMinimalSubtext = "Minimal mode",
       notificationNoTrack = "No track",
       stopLabel = "Stop",
       restartLabel = "Restart"

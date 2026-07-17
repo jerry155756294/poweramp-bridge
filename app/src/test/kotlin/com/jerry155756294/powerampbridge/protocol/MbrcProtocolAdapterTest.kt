@@ -39,6 +39,16 @@ class MbrcProtocolAdapterTest {
   }
 
   @Test
+  fun `playervolume applies the requested percent and confirms the actual volume`() {
+    val reply = JSONObject(
+      adapter.handleCommand(IncomingMessage(ProtocolConstants.PlayerVolume, 75)).single()
+    )
+
+    assertEquals(75, controller.lastVolume)
+    assertEquals(75, reply.getInt("data"))
+  }
+
+  @Test
   fun `cached nowplayingcover payload is returned unchanged`() {
     controller.coverPayload = mapOf("status" to 200, "cover" to "abc")
     controller.coverStatus = 1
@@ -471,6 +481,7 @@ class MbrcProtocolAdapterTest {
     var playedQueuePosition: Int? = null
     var playedPath: String? = null
     var lastLfmRatingAction: String? = null
+    var lastVolume: Int? = null
 
     override fun currentCoverStatus(): Int = coverStatus
     override fun currentCoverPayload(): Map<String, Any?> {
@@ -516,7 +527,10 @@ class MbrcProtocolAdapterTest {
       lastQueueCommandPlayPath = playPath
       return queueCommandResult
     }
-    override fun setVolume(volumePercent: Int) = Unit
+    override fun setVolume(volumePercent: Int) {
+      lastVolume = volumePercent
+      repository.updatePlayback { it.copy(volume = volumePercent) }
+    }
     override fun refreshVolumeSnapshot() = Unit
     override fun seekTo(positionMs: Long): Boolean = true
     override fun setLfmRating(action: String): Boolean {

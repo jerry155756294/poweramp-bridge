@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
@@ -74,11 +75,13 @@ class BridgeService : Service() {
   private lateinit var notificationPresenter: BridgeNotificationPresenter
   private lateinit var commandPipeline: PlaybackCommandPipeline
   private lateinit var observationPipeline: PlaybackObservationPipeline
+  private lateinit var runtimeLocks: BridgeRuntimeLocks
 
   override fun onCreate() {
     super.onCreate()
     app = application as BridgeApplication
     val stateRepository = app.appContainer.stateRepository
+    runtimeLocks = BridgeRuntimeLocks(this)
     powerampGateway = PowerampGateway(this, app.appContainer.stateRepository)
     discoveryResponder = MbrcDiscoveryResponder(this, stateRepository::recordProtocolEvent)
     adapter = MbrcProtocolAdapter(
@@ -210,10 +213,15 @@ class BridgeService : Service() {
     createNotificationChannel()
     stateRepository.markServiceStarted()
     notificationPresenter.foregroundPersistent = activeSettings.foregroundPersistent
-    notificationPresenter.minimalMode = activeSettings.minimalForegroundNotification
     val initialState = stateRepository.state.value
     lastNotificationSnapshot = notificationPresenter.snapshot(initialState)
-    startForeground(NOTIFICATION_ID, notificationPresenter.build(initialState))
+    ServiceCompat.startForeground(
+      this,
+      NOTIFICATION_ID,
+      notificationPresenter.build(initialState),
+      ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+    )
+    runtimeLocks.acquire(stateRepository::recordProtocolEvent)
     powerampGateway.start()
     observeSettings()
     observeState()
@@ -225,6 +233,13 @@ class BridgeService : Service() {
       ACTION_RESTART -> beginServiceRestart()
     }
     return START_STICKY
+  }
+
+  override fun onTimeout(startId: Int, fgsType: Int) {
+    if (::app.isInitialized) {
+      app.appContainer.stateRepository.recordProtocolEvent("foreground_service_timeout:type=$fgsType")
+    }
+    beginServiceStop(manualStop = false)
   }
 
   override fun onDestroy() {
@@ -251,11 +266,6 @@ class BridgeService : Service() {
       app.appContainer.settingsRepository.settings.collectLatest { settings ->
         activeSettings = settings
         notificationPresenter.foregroundPersistent = settings.foregroundPersistent
-        notificationPresenter.minimalMode = settings.minimalForegroundNotification
-        if (!settings.powerampDataAccessPermissionRequested) {
-          powerampGateway.requestDataAccessPermission()
-          app.appContainer.settingsRepository.markPowerampDataAccessPermissionRequested()
-        }
         lastObservedState?.let { state ->
           val notificationSnapshot = notificationPresenter.snapshot(state)
           if (notificationSnapshot != lastNotificationSnapshot) {
@@ -650,6 +660,10 @@ class BridgeService : Service() {
     if (::powerampGateway.isInitialized) {
       runCatching { powerampGateway.stop() }
         .onFailure { Timber.w(it, "Failed to stop Poweramp gateway cleanly") }
+    }
+
+    if (::runtimeLocks.isInitialized) {
+      runtimeLocks.release(app.appContainer.stateRepository::recordProtocolEvent)
     }
 
     if (::app.isInitialized) {

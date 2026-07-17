@@ -118,19 +118,6 @@ class BridgeStateRepository {
     }
   }
 
-  fun setPowerampDataAccess(status: PowerampDataAccessStatus, detail: String? = null) {
-    _state.update { current ->
-      if (current.powerampDataAccess == status && current.powerampDataAccessDetail == detail) {
-        current
-      } else {
-        current.copy(
-        powerampDataAccess = status,
-        powerampDataAccessDetail = detail
-        )
-      }
-    }
-  }
-
   fun updatePlayback(transform: (PlaybackSnapshot) -> PlaybackSnapshot) {
     _state.update { current ->
       current.copy(playback = transform(current.playback))
