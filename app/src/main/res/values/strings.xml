@@ -52,6 +52,13 @@
   <string name="settings_advanced_diagnostics">Advanced diagnostics</string>
   <string name="settings_advanced_on">Raw protocol categories and handshake details are shown in Diagnostics.</string>
   <string name="settings_advanced_off">Diagnostics use short, human-readable event summaries.</string>
+  <string name="settings_background_title">Background reliability</string>
+  <string name="settings_background_restricted">Battery optimization is on</string>
+  <string name="settings_background_unrestricted">Battery optimization is off</string>
+  <string name="settings_background_restricted_summary">To receive MBRC commands with the screen off, allow unrestricted battery use. On Realme, also enable background activity and auto-launch if those options appear.</string>
+  <string name="settings_background_unrestricted_summary">Bridge is excluded from Android battery optimization. The running service also holds CPU and Wi-Fi locks while it is active.</string>
+  <string name="settings_allow_unrestricted">Allow unrestricted battery use</string>
+  <string name="settings_open_app_battery">Open app battery settings</string>
 
   <string name="start_bridge">Start Bridge</string>
   <string name="restart_bridge">Restart Bridge</string>

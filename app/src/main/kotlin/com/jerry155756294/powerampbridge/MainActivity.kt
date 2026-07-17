@@ -1,8 +1,13 @@
 package com.jerry155756294.powerampbridge
 
 import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -41,6 +46,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,6 +63,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.jerry155756294.powerampbridge.bridge.BridgeService
 import com.jerry155756294.powerampbridge.bridge.BridgeUiState
 import com.jerry155756294.powerampbridge.bridge.LogEntry
@@ -350,6 +359,7 @@ private fun SettingsTab(
         }
       }
     )
+    BatteryOptimizationCard()
     ServiceActionRow(uiState.serviceRunning, onStart, onStop)
   }
 }
@@ -553,6 +563,77 @@ private fun StatusLine(label: String, value: String) {
     Text(label, style = MaterialTheme.typography.labelMedium)
     Text(value, style = MaterialTheme.typography.bodyMedium)
   }
+}
+
+@Composable
+private fun BatteryOptimizationCard() {
+  val context = LocalContext.current
+  val lifecycleOwner = LocalLifecycleOwner.current
+  var isExempt by remember { mutableStateOf(context.isIgnoringBatteryOptimizations()) }
+
+  DisposableEffect(context, lifecycleOwner) {
+    val observer = LifecycleEventObserver { _, event ->
+      if (event == Lifecycle.Event.ON_RESUME) {
+        isExempt = context.isIgnoringBatteryOptimizations()
+      }
+    }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+  }
+
+  SectionCard(stringResource(R.string.settings_background_title)) {
+    Text(
+      stringResource(
+        if (isExempt) R.string.settings_background_unrestricted else R.string.settings_background_restricted
+      ),
+      style = MaterialTheme.typography.titleSmall,
+      fontWeight = FontWeight.SemiBold
+    )
+    Text(
+      stringResource(
+        if (isExempt) {
+          R.string.settings_background_unrestricted_summary
+        } else {
+          R.string.settings_background_restricted_summary
+        }
+      ),
+      style = MaterialTheme.typography.bodySmall
+    )
+    Button(
+      onClick = {
+        context.requestBatteryOptimizationExemption()
+        isExempt = context.isIgnoringBatteryOptimizations()
+      },
+      modifier = Modifier.fillMaxWidth(),
+      shape = MaterialTheme.shapes.large
+    ) {
+      Text(
+        stringResource(
+          if (isExempt) R.string.settings_open_app_battery else R.string.settings_allow_unrestricted
+        )
+      )
+    }
+  }
+}
+
+private fun Context.isIgnoringBatteryOptimizations(): Boolean {
+  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+  return getSystemService(PowerManager::class.java)
+    ?.isIgnoringBatteryOptimizations(packageName)
+    ?: false
+}
+
+private fun Context.requestBatteryOptimizationExemption() {
+  val packageUri = Uri.parse("package:$packageName")
+  val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !isIgnoringBatteryOptimizations()) {
+    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).setData(packageUri)
+  } else {
+    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(packageUri)
+  }
+  runCatching { startActivity(intent) }
+    .onFailure {
+      startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(packageUri))
+    }
 }
 
 @Composable
