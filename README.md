@@ -23,12 +23,6 @@ The goal is to let an existing [musicbeeremote/mbrc](https://github.com/musicbee
 - On some Xiaomi/MIUI devices, when testing with localhost or a same-device sender app alongside Poweramp, MIUI SystemUI may prioritize the sender app's MediaSession and dispatch `pause` to Poweramp.
 - Current evidence indicates this is a SystemUI MediaSession arbitration issue rather than a bridge protocol failure.
 
-Recommended test setups:
-
-- Realme sender -> Redmi or other receiver device
-- PC or raw socket client -> bridge
-- Any setup that avoids the sender app creating an active MediaSession on the same MIUI device as Poweramp
-
 ## Build
 
 GitHub Actions runs debug compilation and unit tests for every change. Pushes and manual Actions runs additionally build a release-signed APK and AAB using the repository's permanent keystore; pull requests only expose a debug APK for validation. These workflows upload artifacts only and do not publish GitHub Releases.
